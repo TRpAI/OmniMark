@@ -984,13 +984,13 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
 
       {/* Tab 4: System Settings & Secret Keys */}
       {activeTab === 'settings' && (
-        <div className="max-w-3xl bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 rounded-3xl shadow-sm">
-          <form onSubmit={handleSaveSettings} className="space-y-6">
+        <div className="w-full bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 p-4 sm:p-6 lg:p-8 rounded-2xl sm:rounded-3xl shadow-sm transition-all">
+          <form onSubmit={handleSaveSettings} className="space-y-6 max-w-4xl">
             <div className="border-b pb-3 border-slate-100 dark:border-slate-800">
-              <h3 className="font-bold text-base text-slate-900 dark:text-slate-100">
+              <h3 className="font-bold text-base sm:text-lg text-slate-900 dark:text-slate-100">
                 系统配置与云端安全密钥
               </h3>
-              <p className="text-xs text-slate-400 mt-1">
+              <p className="text-xs sm:text-sm text-slate-400 mt-1">
                 统一配置站点信息、Google Gemini AI 密钥及 Cloudflare 边缘绑定参数
               </p>
             </div>
@@ -1010,14 +1010,14 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               <h4 className="font-bold text-xs uppercase tracking-wider text-slate-400">
                 1. 站点基础信息
               </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">站点名称</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">站点名称</label>
                   <input
                     type="text"
                     value={siteName}
                     onChange={(e) => setSiteName(e.target.value)}
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-all ${
+                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                     required
@@ -1025,12 +1025,12 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">副标题 / 描述</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">副标题 / 描述</label>
                   <input
                     type="text"
                     value={siteSubtitle}
                     onChange={(e) => setSiteSubtitle(e.target.value)}
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-all ${
+                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                     required
@@ -1039,13 +1039,13 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-500 mb-1.5">顶部公告信息 (可选)</label>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">顶部公告信息 (可选)</label>
                 <input
                   type="text"
                   value={announcement}
                   onChange={(e) => setAnnouncement(e.target.value)}
                   placeholder="例如：系统已成功迁移至 Cloudflare 边缘全托管架构！"
-                  className={`w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-all ${
+                  className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                     darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                   }`}
                 />
@@ -1055,7 +1055,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
             {/* Cloud & AI API Tokens */}
             <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
               <div className="flex items-center gap-2">
-                <Key className="w-4 h-4 text-amber-500" />
+                <Key className="w-4 h-4 text-amber-500 shrink-0" />
                 <h4 className="font-bold text-xs uppercase tracking-wider text-slate-400">
                   2. AI 与 Cloudflare 专属密钥配置
                 </h4>
@@ -1063,8 +1063,8 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
 
               {/* Gemini Key */}
               <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold text-slate-500">Google Gemini API Key</label>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-1.5">
+                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Google Gemini API Key</label>
                   <span className="text-[11px] text-blue-500">Gemini 2.5 Flash 智能推荐引擎</span>
                 </div>
                 <div className="relative">
@@ -1092,8 +1092,8 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
 
               {/* Cloudflare API Token */}
               <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold text-slate-500">Cloudflare API Token</label>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-1.5">
+                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Cloudflare API Token</label>
                   <span className="text-[11px] text-amber-500">Workers / D1 / KV 远程管理</span>
                 </div>
                 <div className="relative">
@@ -1117,9 +1117,9 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               </div>
 
               {/* Cloudflare Account ID & Resource IDs */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">Cloudflare Account ID</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Cloudflare Account ID</label>
                   <input
                     type="text"
                     value={cfAccountId}
@@ -1132,7 +1132,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">D1 Database ID</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">D1 Database ID</label>
                   <input
                     type="text"
                     value={cfD1DatabaseId}
@@ -1144,8 +1144,8 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">KV Namespace ID</label>
+                <div className="sm:col-span-2 lg:col-span-1">
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">KV Namespace ID</label>
                   <input
                     type="text"
                     value={cfKvNamespaceId}
@@ -1164,27 +1164,27 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               <h4 className="font-bold text-xs uppercase tracking-wider text-slate-400">
                 3. 管理员安全密码设置
               </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">当前密码 (验证)</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">当前密码 (验证)</label>
                   <input
                     type="password"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
                     placeholder="修改密码时填写"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-all ${
+                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">设置新密码</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">设置新密码</label>
                   <input
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="输入新密码 (不少于6位)"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-all ${
+                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                   />
@@ -1196,7 +1196,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               <button
                 type="submit"
                 disabled={settingsLoading}
-                className="h-10 inline-flex items-center justify-center px-6 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm shadow-blue-500/20 disabled:opacity-50 whitespace-nowrap"
+                className="w-full sm:w-auto h-11 inline-flex items-center justify-center px-8 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-semibold hover:bg-blue-700 transition-colors shadow-sm shadow-blue-500/20 disabled:opacity-50 whitespace-nowrap"
               >
                 {settingsLoading ? "保存配置中..." : "保存系统配置与密钥"}
               </button>

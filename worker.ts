@@ -29,11 +29,18 @@ declare global {
 }
 
 export interface Env {
-  DB: D1Database;
-  CACHE_KV: KVNamespace;
+  DB?: D1Database;
+  db?: D1Database;
+  D1?: D1Database;
+  DATABASE?: D1Database;
+  CACHE_KV?: KVNamespace;
+  KV?: KVNamespace;
+  cache_kv?: KVNamespace;
+  kv?: KVNamespace;
   ENVIRONMENT?: string;
   GEMINI_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  [key: string]: any;
 }
 
 export default {
@@ -110,16 +117,28 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
     return new Response(null, { headers: corsHeaders });
   }
 
-  const d1Bound = Boolean(env && env.DB && typeof env.DB.prepare === "function");
-  const kvBound = Boolean(env && env.CACHE_KV && typeof env.CACHE_KV.get === "function");
+  // Resolve D1 and KV instances with flexible aliases
+  const activeD1 = env?.DB || env?.db || env?.D1 || env?.DATABASE;
+  const activeKV = env?.CACHE_KV || env?.KV || env?.cache_kv || env?.kv;
+
+  const d1Bound = Boolean(activeD1 && typeof activeD1.prepare === "function");
+  const kvBound = Boolean(activeKV && typeof activeKV.get === "function");
+
+  // Normalize to env.DB and env.CACHE_KV so all downstream operations work transparently
+  if (d1Bound) {
+    env.DB = activeD1;
+  }
+  if (kvBound) {
+    env.CACHE_KV = activeKV;
+  }
 
   // Warnings for unconfigured D1 and KV
   const warnings: string[] = [];
   if (!d1Bound) {
-    warnings.push("Cloudflare D1 数据库未绑定 (env.DB 缺失)：当前未检测到 D1 数据库绑定，写入操作将无法持久化。请在 wrangler.toml 或 Cloudflare Dashboard -> Workers & Pages -> 设置 -> 变量与绑定 中添加 D1 数据库绑定 (变量名: DB)。");
+    warnings.push("Cloudflare D1 数据库未绑定 (env.DB 缺失)：请在 Cloudflare 控制台 -> Workers 和 Pages -> 您的项目 -> 设置 -> 函数(或绑定) 中添加 D1 数据库绑定，变量名称填 DB。");
   }
   if (!kvBound) {
-    warnings.push("Cloudflare KV 缓存未绑定 (env.CACHE_KV 缺失)：未检测到 KV 命名空间绑定，无法启用边缘缓存加速。请在 wrangler.toml 或控制台添加 KV 绑定 (变量名: CACHE_KV)。");
+    warnings.push("Cloudflare KV 缓存未绑定 (env.CACHE_KV 缺失)：请在 Cloudflare 控制台 -> 设置 -> 函数(或绑定) 中添加 KV 命名空间绑定，变量名称填 CACHE_KV。");
   }
 
   // Cloudflare Free Tier Specifications
