@@ -945,8 +945,12 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 // Vite middleware & static serving
 if (process.env.NODE_ENV !== "production") {
+  const isHmrDisabled = process.env.DISABLE_HMR === "true";
   const vite = await createViteServer({
-    server: { middlewareMode: true },
+    server: { 
+      middlewareMode: true,
+      hmr: isHmrDisabled ? false : undefined
+    },
     appType: "spa",
   });
   app.use(vite.middlewares);

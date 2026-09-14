@@ -9,6 +9,24 @@
     <meta property="og:description" content="现代化极简站点导航与书签管理系统，支持多端同步、自定义分类、拖拽排序、浏览器书签导入导出、网页一键采集与自动抓取图标。" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress benign container WebSocket / HMR connection failure rejections in sandbox
+      window.addEventListener('unhandledrejection', function(e) {
+        var reason = e && e.reason;
+        var msg = (reason && (reason.message || (typeof reason === 'string' ? reason : ''))) || '';
+        if (msg.toLowerCase().includes('websocket')) {
+          e.preventDefault();
+          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function(e) {
+        var msg = (e && (e.message || (typeof e === 'string' ? e : ''))) || '';
+        if (msg.toLowerCase().includes('websocket') || msg.includes('[vite]')) {
+          e.preventDefault();
+          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        }
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

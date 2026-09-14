@@ -7,19 +7,11 @@ pages_build_output_dir = "dist"
 ENVIRONMENT = "production"
 
 # =========================================================================
-# 【项目 D1 数据库与 KV 绑定管理】
-# 说明：当通过 wrangler.toml 管理时，请将您在 Cloudflare 创建的 D1 与 KV ID
-# 填入下方（注意：必须是真实的 ID，不能使用占位符，否则 CF 会报 8000022 校验错误）
-#
-# 1. 创建 D1: npx wrangler d1 create omnimark-d1
-# 2. 创建 KV: npx wrangler kv namespace create CACHE_KV
+# 【Cloudflare 资源绑定说明】
+# D1 数据库 UUID 和 KV 命名空间 ID 无需在此文件中填入，也无需在构建时管理。
+# 1. 登录 Cloudflare 控制台 -> Workers 和 Pages -> 选择您的项目
+# 2. 点击「设置 (Settings)」->「函数 / 绑定 (Bindings)」
+# 3. 添加 D1 数据库绑定（变量名: DB）和 KV 命名空间绑定（变量名: CACHE_KV）
+# 4. 您也可以直接在站点管理后台「系统设置与密钥」中输入保存 D1 UUID 与 KV ID
 # =========================================================================
 
-[[d1_databases]]
-binding = "DB"
-database_name = "omnimark-d1"
-database_id = "uuid"
-
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "uuid"

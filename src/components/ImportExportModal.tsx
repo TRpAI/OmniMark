@@ -19,8 +19,6 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  if (!isOpen) return null;
-
   const handleExport = (format: "json" | "html") => {
     window.open(`/api/export?format=${format}`, "_blank");
   };
@@ -77,6 +75,8 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
     };
     reader.readAsText(file);
   };
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm">

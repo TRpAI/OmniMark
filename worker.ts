@@ -146,10 +146,10 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
   // Warnings for unconfigured D1 and KV
   const warnings: string[] = [];
   if (!d1Bound) {
-    warnings.push("Cloudflare D1 数据库未绑定：请在 wrangler.toml 的 [[d1_databases]] 中填写真实的 database_id，或在 Cloudflare 控制台添加 D1 绑定 (名称: DB)。");
+    warnings.push("Cloudflare D1 数据库未绑定：无需修改 wrangler.toml，请在「管理后台 -> 系统设置与密钥」中填入 D1 Database UUID 并保存，并在 Cloudflare Pages/Workers 控制台「设置 -> 函数/绑定」中添加 D1 绑定（变量名称: DB）。");
   }
   if (!kvBound) {
-    warnings.push("Cloudflare KV 缓存未绑定：请在 wrangler.toml 的 [[kv_namespaces]] 中填写真实的 32位十六进制 id，或在 Cloudflare 控制台添加 KV 绑定 (名称: CACHE_KV)。");
+    warnings.push("Cloudflare KV 命名空间未绑定：无需修改 wrangler.toml，请在「管理后台 -> 系统设置与密钥」中填入 KV Namespace ID 并保存，并在 Cloudflare 控制台添加 KV 绑定（变量名称: CACHE_KV）。");
   }
 
   // Cloudflare Free Tier Specifications

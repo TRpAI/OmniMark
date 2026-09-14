@@ -36,8 +36,6 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
     setErrorMsg("");
   }, [editingCategory, isOpen]);
 
-  if (!isOpen) return null;
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -80,6 +78,8 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
     { label: "学习", name: "BookOpen" },
     { label: "通用", name: "Folder" }
   ];
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm">

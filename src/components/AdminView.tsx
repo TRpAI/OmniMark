@@ -1117,44 +1117,57 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               </div>
 
               {/* Cloudflare Account ID & Resource IDs */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Cloudflare Account ID</label>
-                  <input
-                    type="text"
-                    value={cfAccountId}
-                    onChange={(e) => setCfAccountId(e.target.value)}
-                    placeholder="账户 ID"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs font-mono outline-none transition-all ${
-                      darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
-                    }`}
-                  />
+              <div className="space-y-3 pt-1">
+                <div className="p-3.5 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/50 dark:border-blue-900/40 text-xs leading-relaxed text-blue-800 dark:text-blue-300">
+                  <span className="font-bold">💡 D1 与 KV 云端绑定说明：</span>
+                  您无需在 <code className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 font-mono text-[11px]">wrangler.toml</code> 中手动填入 UUID。请在此处填入您在 Cloudflare 创建的 D1 数据库 UUID 和 KV 命名空间 ID，点击下方保存即可自动持久化至后台系统配置；同时在 Cloudflare Pages/Workers 控制台面板的「函数/绑定」中分别绑定变量名 <code className="font-bold font-mono">DB</code> 与 <code className="font-bold font-mono">CACHE_KV</code>。
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">D1 Database ID</label>
-                  <input
-                    type="text"
-                    value={cfD1DatabaseId}
-                    onChange={(e) => setCfD1DatabaseId(e.target.value)}
-                    placeholder="D1 数据库 UUID"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs font-mono outline-none transition-all ${
-                      darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
-                    }`}
-                  />
-                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
+                  <div className="w-full">
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 truncate">
+                      Cloudflare Account ID (账户 ID)
+                    </label>
+                    <input
+                      type="text"
+                      value={cfAccountId}
+                      onChange={(e) => setCfAccountId(e.target.value)}
+                      placeholder="例如: 32位十六进制账户 ID"
+                      className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm font-mono outline-none transition-all ${
+                        darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
+                      }`}
+                    />
+                  </div>
 
-                <div className="sm:col-span-2 lg:col-span-1">
-                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">KV Namespace ID</label>
-                  <input
-                    type="text"
-                    value={cfKvNamespaceId}
-                    onChange={(e) => setCfKvNamespaceId(e.target.value)}
-                    placeholder="KV 命名空间 ID"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs font-mono outline-none transition-all ${
-                      darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
-                    }`}
-                  />
+                  <div className="w-full">
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 truncate">
+                      D1 Database UUID (数据库 ID)
+                    </label>
+                    <input
+                      type="text"
+                      value={cfD1DatabaseId}
+                      onChange={(e) => setCfD1DatabaseId(e.target.value)}
+                      placeholder="例如: 8a4c1234-5678-4abc-9def-..."
+                      className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm font-mono outline-none transition-all ${
+                        darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
+                      }`}
+                    />
+                  </div>
+
+                  <div className="w-full md:col-span-2 xl:col-span-1">
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 truncate">
+                      KV Namespace ID (命名空间 ID)
+                    </label>
+                    <input
+                      type="text"
+                      value={cfKvNamespaceId}
+                      onChange={(e) => setCfKvNamespaceId(e.target.value)}
+                      placeholder="例如: 32位十六进制命名空间 ID"
+                      className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm font-mono outline-none transition-all ${
+                        darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
+                      }`}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1165,26 +1178,26 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                 3. 管理员安全密码设置
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                <div>
+                <div className="w-full">
                   <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">当前密码 (验证)</label>
                   <input
                     type="password"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
                     placeholder="修改密码时填写"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
+                    className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                   />
                 </div>
-                <div>
+                <div className="w-full">
                   <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">设置新密码</label>
                   <input
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="输入新密码 (不少于6位)"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
+                    className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
                   />
