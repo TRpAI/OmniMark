@@ -917,39 +917,66 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
             </div>
           </div>
 
-          {/* Configuration Snippet Helper */}
+          {/* Cloudflare Dashboard Binding Guide */}
           <div className={`p-5 rounded-3xl border space-y-4 ${
             darkMode ? "bg-slate-900/40 border-slate-800" : "bg-white border-slate-200"
           }`}>
             <div className="flex items-center justify-between">
               <h4 className="font-bold text-xs flex items-center gap-1.5">
                 <Server className="w-4 h-4 text-blue-500" />
-                <span>Cloudflare 部署绑定配置代码 (wrangler.toml)</span>
+                <span>Cloudflare 控制台面板图形化绑定指引（推荐·无需修改代码）</span>
               </h4>
-              <button
-                onClick={handleCopyWranglerConfig}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-              >
-                {copiedSnippet ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedSnippet ? "已复制配置" : "一键复制配置"}</span>
-              </button>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 font-semibold">
+                面板可视化管理
+              </span>
             </div>
 
-            <pre className="p-4 rounded-2xl bg-slate-950 text-slate-200 text-[11px] font-mono overflow-x-auto leading-relaxed border border-slate-800">
-{`# 1. 终端运行命令创建 D1 与 KV：
-npx wrangler d1 create omnimark-d1
-npx wrangler kv namespace create CACHE_KV
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 space-y-3 leading-relaxed">
+              <div className="flex items-start gap-2.5">
+                <span className="w-5 h-5 rounded-full bg-blue-500 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+                <div>
+                  <strong className="text-slate-800 dark:text-slate-200">在 Cloudflare 面板创建数据库与缓存：</strong>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    前往左侧「存储和数据库」→ 分别创建 D1 数据库（如 <code className="font-mono bg-slate-200 dark:bg-slate-800 px-1 py-0.5 rounded">omnimark-d1</code>）和 KV 命名空间（如 <code className="font-mono bg-slate-200 dark:bg-slate-800 px-1 py-0.5 rounded">CACHE_KV</code>）。
+                  </p>
+                </div>
+              </div>
 
-# 2. 将返回的 ID 填入 wrangler.toml：
-[[d1_databases]]
-binding = "DB"
-database_name = "omnimark-d1"
-database_id = "${cfD1DatabaseId || "您的_D1_DATABASE_ID"}"
+              <div className="flex items-start gap-2.5">
+                <span className="w-5 h-5 rounded-full bg-blue-500 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+                <div>
+                  <strong className="text-slate-800 dark:text-slate-200">进入 Pages 项目设置：</strong>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    在「Workers 和 Pages」中打开您的项目 → 点击顶部的 <strong>设置 (Settings)</strong> → 左侧选择 <strong>函数 (Functions)</strong> 或 <strong>绑定 (Bindings)</strong>。
+                  </p>
+                </div>
+              </div>
 
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "${cfKvNamespaceId || "您的_KV_NAMESPACE_ID"}"`}
-            </pre>
+              <div className="flex items-start gap-2.5">
+                <span className="w-5 h-5 rounded-full bg-blue-500 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+                <div>
+                  <strong className="text-slate-800 dark:text-slate-200">添加两个关键绑定：</strong>
+                  <div className="mt-1 space-y-1 text-[11px]">
+                    <div className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 font-mono">
+                      • <strong>D1 数据库绑定</strong>：变量名填 <span className="text-blue-500 font-bold">DB</span>，下拉选择您的 D1 数据库。
+                    </div>
+                    <div className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 font-mono">
+                      • <strong>KV 命名空间绑定</strong>：变量名填 <span className="text-purple-500 font-bold">CACHE_KV</span>，下拉选择您的 KV 命名空间。
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-start gap-2.5">
+                <span className="w-5 h-5 rounded-full bg-emerald-500 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">4</span>
+                <div>
+                  <strong className="text-slate-800 dark:text-slate-200">重试部署生效：</strong>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    保存后，在「部署 (Deployments)」选项卡点击最新部署右侧的「···」→ 选择「重试部署 (Retry deployment)」，系统即可自动挂载，永久无需修改任何本地文件！
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
         </div>
