@@ -1,24 +1,18 @@
+# Cloudflare Pages 配置文件 (专为 Cloudflare Pages 部署设计)
 name = "omnimark-navigation"
-main = "worker.js"
-compatibility_date = "2026-03-01"
-
-# Cloudflare Pages static assets output directory
+compatibility_date = "2024-09-01"
 pages_build_output_dir = "dist"
 
 [vars]
 ENVIRONMENT = "production"
-# GEMINI_API_KEY = "your-gemini-api-key"
 
-# Cloudflare D1 Database Binding (持久化存储)
-# 创建命令: npx wrangler d1 create omnimark-d1
+# Cloudflare D1 Database Binding
 [[d1_databases]]
 binding = "DB"
 database_name = "omnimark-d1"
 database_id = "your-d1-database-id"
 
-# Cloudflare KV Binding (边缘高速缓存)
-# 创建命令: npx wrangler kv namespace create CACHE_KV
+# Cloudflare KV Namespace Binding
 [[kv_namespaces]]
 binding = "CACHE_KV"
 id = "your-kv-namespace-id"
-
