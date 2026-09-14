@@ -117,9 +117,20 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Resolve D1 and KV instances with flexible aliases
-  const activeD1 = env?.DB || env?.db || env?.D1 || env?.DATABASE;
-  const activeKV = env?.CACHE_KV || env?.KV || env?.cache_kv || env?.kv;
+  // 深度智能扫描 env 对象：即使绑定的变量名大小写不一致或用了自定义名称，也能自动识别
+  let activeD1 = env?.DB || env?.db || env?.D1 || env?.DATABASE;
+  let activeKV = env?.CACHE_KV || env?.KV || env?.cache_kv || env?.kv;
+
+  if (env && typeof env === "object") {
+    for (const [key, val] of Object.entries(env)) {
+      if (!activeD1 && val && typeof (val as any).prepare === "function") {
+        activeD1 = val as any;
+      }
+      if (!activeKV && val && typeof (val as any).get === "function" && typeof (val as any).put === "function") {
+        activeKV = val as any;
+      }
+    }
+  }
 
   const d1Bound = Boolean(activeD1 && typeof activeD1.prepare === "function");
   const kvBound = Boolean(activeKV && typeof activeKV.get === "function");
@@ -135,10 +146,10 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
   // Warnings for unconfigured D1 and KV
   const warnings: string[] = [];
   if (!d1Bound) {
-    warnings.push("Cloudflare D1 数据库未绑定 (env.DB 缺失)：请在 Cloudflare 控制台 -> Workers 和 Pages -> 您的项目 -> 设置 -> 函数(或绑定) 中添加 D1 数据库绑定，变量名称填 DB。");
+    warnings.push("Cloudflare D1 数据库未绑定：请在 wrangler.toml 的 [[d1_databases]] 中填写真实的 database_id，或在 Cloudflare 控制台添加 D1 绑定 (名称: DB)。");
   }
   if (!kvBound) {
-    warnings.push("Cloudflare KV 缓存未绑定 (env.CACHE_KV 缺失)：请在 Cloudflare 控制台 -> 设置 -> 函数(或绑定) 中添加 KV 命名空间绑定，变量名称填 CACHE_KV。");
+    warnings.push("Cloudflare KV 缓存未绑定：请在 wrangler.toml 的 [[kv_namespaces]] 中填写真实的 32位十六进制 id，或在 Cloudflare 控制台添加 KV 绑定 (名称: CACHE_KV)。");
   }
 
   // Cloudflare Free Tier Specifications

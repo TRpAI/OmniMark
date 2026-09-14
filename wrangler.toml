@@ -1,8 +1,25 @@
-# Cloudflare Pages 基础配置文件
-# 注意：本项目已全面适配 Cloudflare 网页面板进行可视化绑定（不需要在 toml 里写死 ID，避免格式校验错误）
+# Cloudflare Pages 配置文件 (专为 Pages 架构设计)
 name = "omnimark-navigation"
 compatibility_date = "2024-09-01"
 pages_build_output_dir = "dist"
 
 [vars]
 ENVIRONMENT = "production"
+
+# =========================================================================
+# 【项目 D1 数据库与 KV 绑定管理】
+# 说明：当通过 wrangler.toml 管理时，请将您在 Cloudflare 创建的 D1 与 KV ID
+# 填入下方（注意：必须是真实的 ID，不能使用占位符，否则 CF 会报 8000022 校验错误）
+#
+# 1. 创建 D1: npx wrangler d1 create omnimark-d1
+# 2. 创建 KV: npx wrangler kv namespace create CACHE_KV
+# =========================================================================
+
+[[d1_databases]]
+binding = "DB"
+database_name = "omnimark-d1"
+database_id = "your-d1-database-id"
+
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "your-kv-namespace-id"
