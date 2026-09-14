@@ -1,4 +1,4 @@
-# Cloudflare Pages 配置文件 (专为 Cloudflare Pages 部署设计)
+# Cloudflare Pages 基础配置文件
 name = "omnimark-navigation"
 compatibility_date = "2024-09-01"
 pages_build_output_dir = "dist"
@@ -6,13 +6,15 @@ pages_build_output_dir = "dist"
 [vars]
 ENVIRONMENT = "production"
 
-# Cloudflare D1 Database Binding
-[[d1_databases]]
-binding = "DB"
-database_name = "omnimark-d1"
-database_id = "your-d1-database-id"
-
-# Cloudflare KV Namespace Binding
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "your-kv-namespace-id"
+# 提示：D1 数据库与 KV 建议直接在 Cloudflare Pages 面板后台点击绑定：
+# 项目 -> Settings -> Functions (或 Bindings) -> 添加 D1 绑定 (名称: DB) 和 KV 绑定 (名称: CACHE_KV)。
+# 如果要在本文件中配置，必须替换成您在 Cloudflare 真实生成的有效 32位十六进制 ID/UUID，不能使用占位符字符。
+#
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "omnimark-d1"
+# database_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [[kv_namespaces]]
+# binding = "CACHE_KV"
+# id = "0123456789abcdef0123456789abcdef"
