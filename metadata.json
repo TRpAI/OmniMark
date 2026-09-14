@@ -1,0 +1,7 @@
+{
+  "name": "OmniMark 站点导航与书签系统",
+  "description": "现代化极简站点导航与书签管理系统，支持多端同步、自定义分类、拖拽排序、浏览器书签导入导出、网页一键采集与自动抓取图标。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
