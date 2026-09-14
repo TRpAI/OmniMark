@@ -18,8 +18,8 @@ ENVIRONMENT = "production"
 [[d1_databases]]
 binding = "DB"
 database_name = "omnimark-d1"
-database_id = "82ebf74d-0134-492c-a8cd-a418dfc79a04"
+database_id = "uuid"
 
 [[kv_namespaces]]
 binding = "CACHE_KV"
-id = "a37e2404786748aca66083ac1bc32c9c"
+id = "uuid"
