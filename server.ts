@@ -4,6 +4,15 @@ import fs from "fs";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
+import {
+  hashPasswordPBKDF2,
+  verifyPasswordPBKDF2,
+  generateSecureToken,
+  isSafeDomain,
+  isSafeUrl,
+  parseNetscapeBookmarks,
+  escapeHtml
+} from "./src/utils/security.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,17 +44,15 @@ if (!fs.existsSync(FAVICONS_DIR)) {
   fs.mkdirSync(FAVICONS_DIR, { recursive: true });
 }
 
-// Helper: Hash password with SHA-256
-function hashPassword(password: string): string {
-  return crypto.createHash("sha256").update(password).digest("hex");
-}
+// Default PBKDF2 hash for initial installation (admin123, 100,000 iterations, 32-byte salt)
+const DEFAULT_ADMIN_HASH = "pbkdf2:sha256:100000:23fb0c6cda199c36b92eb7ab502043b6:8a3adcb7fcaf7581a527a62a6cdd974ea8324b1a1bc8077f2ebfb7758a65063d";
 
-// Initial default database structure with hashed default password (admin123)
+// Initial default database structure
 const defaultData = {
   settings: {
     siteName: "OmniMark 站点导航与书签系统",
     siteSubtitle: "极简、高效、多端同步的现代化站点导航与书签管理系统",
-    adminPasswordHash: hashPassword("admin123"),
+    adminPasswordHash: DEFAULT_ADMIN_HASH,
     defaultViewMode: "grid",
     allowPublicSubmit: false,
     enableWeather: true,
@@ -136,20 +143,32 @@ function writeDb(data: any) {
   }
 }
 
-// Active Secure Admin Tokens Store
-const activeAdminTokens = new Set<string>();
+// Active Secure Admin Sessions Store with Expiration Checking
+interface AdminSession {
+  token: string;
+  expiresAt: number; // Unix timestamp in ms
+}
+const activeAdminSessions = new Map<string, AdminSession>();
 
-// Authentication middleware with robust token validation & query protection
+// Authentication middleware with strict header-only token extraction & expiration verification
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const queryTokenRaw = req.query.token;
-  const queryToken = Array.isArray(queryTokenRaw) ? queryTokenRaw[0] : queryTokenRaw;
-  const effectiveToken = token || (typeof queryToken === "string" ? queryToken : null);
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
 
-  if (!effectiveToken || !activeAdminTokens.has(effectiveToken)) {
+  if (!token) {
     return res.status(401).json({ error: "未授权：请先登录管理员账户以执行该操作" });
   }
+
+  const session = activeAdminSessions.get(token);
+  if (!session) {
+    return res.status(401).json({ error: "未授权：登录令牌无效或已失效，请重新登录" });
+  }
+
+  if (session.expiresAt <= Date.now()) {
+    activeAdminSessions.delete(token);
+    return res.status(401).json({ error: "登录会话已过期，请重新登录" });
+  }
+
   next();
 }
 
@@ -194,67 +213,9 @@ function recordLoginFailure(ip: string) {
   }
 }
 
+// Clear rate limit entries upon success
 function clearLoginFailures(ip: string) {
   loginRateLimitMap.delete(ip);
-}
-
-// Robust SSRF Safe Domain Validator
-function isSafeDomain(domain: string): boolean {
-  if (!domain || typeof domain !== "string" || domain.length > 253) return false;
-  const lower = domain.toLowerCase().trim();
-
-  // Forbidden local / loopback / metadata / private hosts
-  const forbiddenHosts = [
-    "localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "::1",
-    "metadata.google.internal", "instance-data", "kubernetes.default"
-  ];
-  if (forbiddenHosts.includes(lower)) return false;
-
-  // Private IPv4 ranges, CGNAT (100.64.0.0/10), link-local
-  if (
-    /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.)/.test(lower)
-  ) {
-    return false;
-  }
-
-  // Private TLDs
-  if (lower.endsWith(".local") || lower.endsWith(".internal") || lower.endsWith(".arpa") || lower.endsWith(".lan") || lower.endsWith(".localhost")) {
-    return false;
-  }
-
-  // Check IPv6 loopback or private ranges
-  if (lower.startsWith("[") && lower.endsWith("]")) {
-    const unbracketed = lower.slice(1, -1);
-    if (unbracketed === "::1" || unbracketed.startsWith("fc") || unbracketed.startsWith("fd") || unbracketed.startsWith("fe80")) {
-      return false;
-    }
-  }
-
-  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(lower);
-}
-
-// URL Protocol Validator
-function isSafeUrl(urlStr: string): boolean {
-  if (!urlStr || typeof urlStr !== "string") return false;
-  const trimmed = urlStr.trim().toLowerCase();
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
-  try {
-    const parsed = new URL(trimmed);
-    return isSafeDomain(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-// HTML Escape helper to prevent XSS
-function escapeHtml(str: string): string {
-  if (!str) return "";
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 // ==========================================
@@ -407,18 +368,24 @@ app.get("/api/settings", (req, res) => {
 });
 
 // Update Settings with Whitelist & Secure Password Change (Admin Only)
-app.put("/api/settings", requireAuth, (req, res) => {
+app.put("/api/settings", requireAuth, async (req, res) => {
   const db = readDb();
   const { currentPassword, newPassword, ...rest } = req.body;
 
   if (newPassword) {
-    if (!currentPassword || hashPassword(currentPassword) !== db.settings.adminPasswordHash) {
+    if (!currentPassword) {
+      return res.status(401).json({ error: "修改密码必须提供当前管理员密码" });
+    }
+    const { valid } = await verifyPasswordPBKDF2(currentPassword, db.settings.adminPasswordHash);
+    if (!valid) {
       return res.status(401).json({ error: "当前管理员密码不正确" });
     }
     if (typeof newPassword !== "string" || newPassword.length < 6) {
       return res.status(400).json({ error: "新密码长度不能少于 6 位" });
     }
-    db.settings.adminPasswordHash = hashPassword(newPassword);
+    db.settings.adminPasswordHash = await hashPasswordPBKDF2(newPassword);
+    // Security Fix: Immediately invalidate and clear all active admin sessions upon password change!
+    activeAdminSessions.clear();
   }
 
   // Strict whitelist for settings updates to prevent arbitrary prototype or secret pollution
@@ -440,8 +407,8 @@ app.put("/api/settings", requireAuth, (req, res) => {
   res.json({ success: true, settings: safeSettings });
 });
 
-// Admin Login (Secure Rate-limited & Cryptographic Token)
-app.post("/api/auth/login", (req, res) => {
+// Admin Login (Secure Rate-limited, PBKDF2 with Auto-upgrade & Cryptographic Session Token)
+app.post("/api/auth/login", async (req, res) => {
   const clientIp = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "unknown").split(",")[0].trim();
 
   if (!checkLoginRateLimit(clientIp)) {
@@ -454,16 +421,40 @@ app.post("/api/auth/login", (req, res) => {
   const { password } = req.body;
   const db = readDb();
 
-  const hashedInput = hashPassword(password || "");
-  if (hashedInput === db.settings.adminPasswordHash) {
+  const { valid, needsUpgrade } = await verifyPasswordPBKDF2(password || "", db.settings.adminPasswordHash);
+  if (valid) {
     clearLoginFailures(clientIp);
-    const token = "omni-admin-token-" + crypto.randomBytes(24).toString("hex");
-    activeAdminTokens.add(token);
-    return res.json({ success: true, token });
+
+    // If legacy hash was verified, seamlessly upgrade to PBKDF2 with 100k iterations and fresh salt
+    if (needsUpgrade) {
+      db.settings.adminPasswordHash = await hashPasswordPBKDF2(password);
+      writeDb(db);
+    }
+
+    const token = generateSecureToken();
+    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days expiration
+    activeAdminSessions.set(token, { token, expiresAt });
+
+    return res.json({ success: true, token, expiresAt });
   }
 
   recordLoginFailure(clientIp);
   return res.status(401).json({ success: false, error: "管理员密码错误，请重新输入" });
+});
+
+// Admin Logout (Safely terminates active session)
+app.post("/api/auth/logout", (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+  if (token) {
+    activeAdminSessions.delete(token);
+  }
+  return res.json({ success: true, message: "已安全退出登录" });
+});
+
+// Verify Current Session Status
+app.get("/api/auth/me", requireAuth, (req, res) => {
+  res.json({ success: true, authenticated: true, role: "admin" });
 });
 
 // ==========================================
@@ -794,6 +785,12 @@ app.get("/api/export", requireAuth, (req, res) => {
   }
 });
 
+// System Settings Whitelist for Backup Imports
+const IMPORT_SETTINGS_WHITELIST = new Set([
+  "siteName", "siteSubtitle", "announcement", "defaultViewMode",
+  "enableWeather", "enableSearchEngine", "defaultSearchEngine"
+]);
+
 app.post("/api/import", requireAuth, (req, res) => {
   const { type, content, mode = "merge" } = req.body;
   const db = readDb();
@@ -802,95 +799,137 @@ app.post("/api/import", requireAuth, (req, res) => {
     if (type === "json") {
       const parsed = typeof content === "string" ? JSON.parse(content) : content;
       if (mode === "replace") {
-        if (parsed.categories && Array.isArray(parsed.categories)) db.categories = parsed.categories;
+        // True replacement: clear existing categories and bookmarks completely
+        db.categories = [];
+        db.bookmarks = [];
+
+        if (parsed.categories && Array.isArray(parsed.categories)) {
+          db.categories = parsed.categories.map((c: any, idx: number) => ({
+            id: c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+            name: String(c.name || "未命名分类").substring(0, 50),
+            icon: String(c.icon || "Folder").substring(0, 30),
+            sortOrder: typeof c.sortOrder === "number" ? c.sortOrder : idx + 1,
+            description: String(c.description || "").substring(0, 200)
+          }));
+        }
+
         if (parsed.bookmarks && Array.isArray(parsed.bookmarks)) {
-          db.bookmarks = parsed.bookmarks.filter((b: any) => b.url && isSafeUrl(b.url));
+          const fallbackCatId = db.categories[0]?.id || "cat-1";
+          db.bookmarks = parsed.bookmarks
+            .filter((b: any) => b.url && isSafeUrl(b.url))
+            .map((b: any, idx: number) => ({
+              id: b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+              title: String(b.title || b.url).substring(0, 150),
+              url: String(b.url).substring(0, 2000),
+              description: String(b.description || "").substring(0, 500),
+              categoryId: b.categoryId || fallbackCatId,
+              icon: resolveFavicon(b.url, b.icon),
+              tags: Array.isArray(b.tags) ? b.tags.map((t: any) => String(t).substring(0, 25)).slice(0, 10) : [],
+              clicks: typeof b.clicks === "number" ? b.clicks : 0,
+              sortOrder: typeof b.sortOrder === "number" ? b.sortOrder : idx + 1,
+              isPinned: Boolean(b.isPinned),
+              createdAt: b.createdAt || new Date().toISOString()
+            }));
         }
-        if (parsed.settings) {
-          const { adminPasswordHash, ...safeImportedSettings } = parsed.settings;
-          db.settings = { ...db.settings, ...safeImportedSettings };
-        }
-      } else {
-        if (Array.isArray(parsed.categories)) {
-          for (const c of parsed.categories) {
-            if (!db.categories.some((item: any) => item.id === c.id || item.name === c.name)) {
-              const maxSort = db.categories.reduce((m: number, item: any) => Math.max(m, item.sortOrder || 0), 0);
-              db.categories.push({
-                ...c,
-                id: c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 5),
-                sortOrder: maxSort + 1
-              });
+
+        if (parsed.settings && typeof parsed.settings === "object") {
+          for (const [key, val] of Object.entries(parsed.settings)) {
+            if (IMPORT_SETTINGS_WHITELIST.has(key) && key !== "__proto__" && key !== "constructor") {
+              db.settings[key] = val;
             }
           }
         }
+      } else {
+        // Merge mode: O(1) deduplication by loading existing URLs & categories in memory
+        const existingUrls = new Set(db.bookmarks.map((b: any) => b.url));
+        const existingCatMap = new Map(db.categories.map((c: any) => [c.name, c.id]));
+
+        if (Array.isArray(parsed.categories)) {
+          for (const c of parsed.categories) {
+            if (!existingCatMap.has(c.name)) {
+              const maxSort = db.categories.reduce((m: number, item: any) => Math.max(m, item.sortOrder || 0), 0);
+              const newCat = {
+                id: c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+                name: String(c.name || "未命名分类").substring(0, 50),
+                icon: String(c.icon || "Folder").substring(0, 30),
+                sortOrder: maxSort + 1,
+                description: String(c.description || "").substring(0, 200)
+              };
+              db.categories.push(newCat);
+              existingCatMap.set(newCat.name, newCat.id);
+            }
+          }
+        }
+
         if (Array.isArray(parsed.bookmarks)) {
+          const fallbackCatId = db.categories[0]?.id || "cat-1";
           for (const b of parsed.bookmarks) {
-            if (b.url && isSafeUrl(b.url) && !db.bookmarks.some((item: any) => item.url === b.url)) {
+            if (b.url && isSafeUrl(b.url) && !existingUrls.has(b.url)) {
               const maxSort = db.bookmarks.reduce((m: number, item: any) => Math.max(m, item.sortOrder || 0), 0);
               db.bookmarks.push({
-                ...b,
-                id: b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 5),
-                sortOrder: maxSort + 1
+                id: b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+                title: String(b.title || b.url).substring(0, 150),
+                url: String(b.url).substring(0, 2000),
+                description: String(b.description || "").substring(0, 500),
+                categoryId: b.categoryId || fallbackCatId,
+                icon: resolveFavicon(b.url, b.icon),
+                tags: Array.isArray(b.tags) ? b.tags.map((t: any) => String(t).substring(0, 25)).slice(0, 10) : [],
+                clicks: typeof b.clicks === "number" ? b.clicks : 0,
+                sortOrder: maxSort + 1,
+                isPinned: Boolean(b.isPinned),
+                createdAt: b.createdAt || new Date().toISOString()
               });
+              existingUrls.add(b.url);
             }
           }
         }
       }
+
       writeDb(db);
-      return res.json({ success: true, message: "JSON 备份数据已成功导入并安全校验" });
+      return res.json({ success: true, message: "JSON 备份数据已安全导入完成" });
     } else if (type === "html") {
+      // Robust Netscape HTML parser with multiline & DD description support
+      const bookmarksToImport = parseNetscapeBookmarks(String(content));
       let importedCount = 0;
-      let currentFolder = "浏览器导入";
 
-      const lines = String(content).split(/\r?\n/);
-      for (const line of lines) {
-        const folderMatch = /<H3[^>]*>(.*?)<\/H3>/i.exec(line);
-        if (folderMatch && folderMatch[1]) {
-          const folderName = folderMatch[1].replace(/<[^>]*>/g, "").trim();
-          if (folderName && folderName !== "Bookmarks" && folderName !== "书签栏") {
-            currentFolder = folderName.substring(0, 50);
-          }
+      const existingUrls = new Set(db.bookmarks.map((b: any) => b.url));
+      const existingCatMap = new Map(db.categories.map((c: any) => [c.name, c.id]));
+
+      for (const item of bookmarksToImport) {
+        if (!isSafeUrl(item.url) || existingUrls.has(item.url)) continue;
+
+        let categoryId = existingCatMap.get(item.categoryName);
+        if (!categoryId) {
+          const maxSortCat = db.categories.reduce((m: number, c: any) => Math.max(m, c.sortOrder || 0), 0);
+          const newCat = {
+            id: "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+            name: item.categoryName,
+            icon: "Folder",
+            sortOrder: maxSortCat + 1,
+            description: "从浏览器书签导入的目录"
+          };
+          db.categories.push(newCat);
+          categoryId = newCat.id;
+          existingCatMap.set(item.categoryName, categoryId);
         }
 
-        const linkMatch = /<A\s+[^>]*?HREF=["']([^"']*)["'][^>]*>(.*?)<\/A>/i.exec(line);
-        if (linkMatch && linkMatch[1]) {
-          const url = linkMatch[1].trim();
-          const rawTitle = linkMatch[2] ? linkMatch[2].replace(/<[^>]*>/g, "").trim() : "";
-          const title = rawTitle || url;
+        const maxSortBm = db.bookmarks.reduce((m: number, b: any) => Math.max(m, b.sortOrder || 0), 0);
+        db.bookmarks.push({
+          id: "bm-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+          title: item.title.substring(0, 150),
+          url: item.url.substring(0, 2000),
+          description: item.description || "从浏览器书签导入",
+          categoryId,
+          icon: resolveFavicon(item.url, item.icon),
+          tags: ["浏览器导入"],
+          clicks: 0,
+          sortOrder: maxSortBm + 1,
+          isPinned: false,
+          createdAt: new Date().toISOString()
+        });
 
-          if (isSafeUrl(url)) {
-            if (!db.bookmarks.some((b: any) => b.url === url)) {
-              let targetCat = db.categories.find((c: any) => c.name === currentFolder);
-              if (!targetCat) {
-                const maxSortCat = db.categories.reduce((m: number, c: any) => Math.max(m, c.sortOrder || 0), 0);
-                targetCat = {
-                  id: "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
-                  name: currentFolder,
-                  icon: "Folder",
-                  sortOrder: maxSortCat + 1,
-                  description: "从浏览器导入的分类目录"
-                };
-                db.categories.push(targetCat);
-              }
-
-              const maxSortBm = db.bookmarks.reduce((m: number, b: any) => Math.max(m, b.sortOrder || 0), 0);
-              db.bookmarks.push({
-                id: "bm-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
-                title: title.substring(0, 150),
-                url: url.substring(0, 2000),
-                description: "从浏览器书签导入",
-                categoryId: targetCat.id,
-                icon: resolveFavicon(url),
-                tags: ["浏览器导入"],
-                clicks: 0,
-                sortOrder: maxSortBm + 1,
-                isPinned: false,
-                createdAt: new Date().toISOString()
-              });
-              importedCount++;
-            }
-          }
-        }
+        existingUrls.add(item.url);
+        importedCount++;
       }
 
       writeDb(db);
@@ -906,7 +945,7 @@ app.post("/api/import", requireAuth, (req, res) => {
   }
 });
 
-// URL Metadata Preview Proxy Endpoint with strict SSRF & domain checks
+// URL Metadata Preview Proxy Endpoint with manual redirect checking against SSRF
 app.get("/api/metadata", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).json({ error: "URL 不能为空" });
@@ -922,19 +961,44 @@ app.get("/api/metadata", async (req, res) => {
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(normalized, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml"
-      },
-      signal: controller.signal,
-      redirect: "follow"
-    });
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    let currentUrl = normalized;
+    let response: any = null;
+
+    // Follow redirects manually with SSRF validation at each hop (max 3 hops)
+    for (let hop = 0; hop < 3; hop++) {
+      const resp = await fetch(currentUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml"
+        },
+        signal: controller.signal,
+        redirect: "manual"
+      });
+
+      if ([301, 302, 303, 307, 308].includes(resp.status)) {
+        const location = resp.headers.get("location");
+        if (!location) break;
+        const nextUrl = new URL(location, currentUrl).toString();
+        if (!isSafeUrl(nextUrl)) {
+          clearTimeout(timeoutId);
+          return res.status(400).json({ error: "重定向到不安全或受限制的地址" });
+        }
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      response = resp;
+      break;
+    }
+
     clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      return res.json({ title: "", description: "", image: "", hostname: new URL(normalized).hostname });
+    if (!response || !response.ok) {
+      let hostname = "";
+      try { hostname = new URL(normalized).hostname.replace(/^www\./, ""); } catch {}
+      return res.json({ title: "", description: "", image: "", hostname, url: normalized });
     }
 
     const html = await response.text();
@@ -957,7 +1021,7 @@ app.get("/api/metadata", async (req, res) => {
 
     let hostname = "";
     try {
-      hostname = new URL(normalized).hostname.replace(/^www\./, "");
+      hostname = new URL(currentUrl).hostname.replace(/^www\./, "");
     } catch {}
 
     res.json({
@@ -965,7 +1029,7 @@ app.get("/api/metadata", async (req, res) => {
       description: description.substring(0, 220),
       image,
       hostname,
-      url: normalized
+      url: currentUrl
     });
   } catch (err: any) {
     let hostname = "";

@@ -9,7 +9,8 @@
     "build:cloudflare": "vite build && esbuild worker.ts --bundle --platform=browser --format=esm --outfile=worker.js",
     "start": "node dist/server.js",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

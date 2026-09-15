@@ -6,6 +6,19 @@
  * - Cloudflare KV (env.CACHE_KV) provides edge caching acceleration
  */
 
+import {
+  hashPasswordPBKDF2,
+  verifyPasswordPBKDF2,
+  generateSecureToken,
+  isSafeDomain,
+  isSafeUrl,
+  parseNetscapeBookmarks,
+  escapeHtml
+} from "./src/utils/security.ts";
+
+// Default PBKDF2 hash for initial installation (admin123, 100,000 iterations, 32-byte salt)
+const DEFAULT_ADMIN_HASH = "pbkdf2:sha256:100000:23fb0c6cda199c36b92eb7ab502043b6:8a3adcb7fcaf7581a527a62a6cdd974ea8324b1a1bc8077f2ebfb7758a65063d";
+
 declare global {
   interface D1Database {
     prepare(query: string): D1PreparedStatement;
@@ -80,14 +93,6 @@ function isRealKV(val: any): boolean {
   return typeof val.getWithMetadata === "function" || typeof val.delete === "function";
 }
 
-// SHA-256 password hashing via Web Crypto API
-async function hashPassword(password: string): Promise<string> {
-  const msgUint8 = new TextEncoder().encode(password);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
 // Initial database schema bootstrap & seeding
 let tablesEnsured = false;
 async function ensureTables(db: D1Database) {
@@ -130,15 +135,14 @@ async function ensureTables(db: D1Database) {
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS admin_sessions (
         token TEXT PRIMARY KEY,
-        expiresAt TEXT
+        expiresAt INTEGER
       )
     `).run();
 
-    // Seed default settings if empty
+    // Seed default settings with PBKDF2 hash if empty
     const adminPass = await db.prepare("SELECT value FROM settings WHERE key = 'adminPasswordHash'").first<any>();
     if (!adminPass) {
-      const defaultHash = await hashPassword("admin123");
-      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(defaultHash)).run();
+      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(DEFAULT_ADMIN_HASH)).run();
       await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteName', ?)").bind(JSON.stringify("OmniMark 导航与书签")).run();
       await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteSubtitle', ?)").bind(JSON.stringify("极简、高效、多端同步的现代化站点导航与书签管理系统")).run();
       await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('allowPublicSubmit', ?)").bind(JSON.stringify(false)).run();
@@ -166,37 +170,50 @@ async function ensureTables(db: D1Database) {
   }
 }
 
-// Authentication middleware verifying stored admin sessions
+// Authentication middleware with strict Header-only check, session expiration, and non-bypass security
 async function requireAuth(request: Request, env: Env): Promise<Response | null> {
   const authHeader = request.headers.get("Authorization");
-  const tokenFromHeader = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const url = new URL(request.url);
-  const tokenFromQuery = url.searchParams.get("token");
-  const token = tokenFromHeader || tokenFromQuery;
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
 
   if (!token) {
-    return new Response(JSON.stringify({ error: "未授权：请先登录管理员账户以执行该操作" }), {
+    return new Response(JSON.stringify({ error: "未授权：请先通过 Authorization 请求头提供管理员令牌" }), {
       status: 401,
       headers: { "Content-Type": "application/json" }
     });
   }
 
-  if (env.DB) {
-    try {
-      const session = await env.DB.prepare("SELECT * FROM admin_sessions WHERE token = ?").bind(token).first<any>();
-      if (!session) {
-        return new Response(JSON.stringify({ error: "授权令牌无效或已过期，请重新登录" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-    } catch (e) {
-      return new Response(JSON.stringify({ error: "鉴权校验异常" }), {
+  // Security critical fix: If D1 database is NOT bound, reject with 503 instead of bypassing!
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: "服务不可用：Cloudflare D1 数据库未绑定，拒绝执行受保护的管理操作" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  try {
+    const session = await env.DB.prepare("SELECT token, expiresAt FROM admin_sessions WHERE token = ?").bind(token).first<any>();
+    if (!session) {
+      return new Response(JSON.stringify({ error: "未授权：登录令牌无效或已被注销，请重新登录" }), {
         status: 401,
         headers: { "Content-Type": "application/json" }
       });
     }
+
+    const expiresAt = typeof session.expiresAt === "number" ? session.expiresAt : parseInt(session.expiresAt, 10);
+    if (!isNaN(expiresAt) && expiresAt <= Date.now()) {
+      await env.DB.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
+      return new Response(JSON.stringify({ error: "登录会话已过期，请重新登录" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: "鉴权校验异常: " + e.message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
   }
+
   return null;
 }
 
@@ -228,59 +245,6 @@ function clearLoginFailures(ip: string) {
   loginRateLimitMap.delete(ip);
 }
 
-// SSRF Safe Domain & URL Validator
-function isSafeDomain(domain: string): boolean {
-  if (!domain || typeof domain !== "string" || domain.length > 253) return false;
-  const lower = domain.toLowerCase().trim();
-
-  const forbiddenHosts = [
-    "localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "::1",
-    "metadata.google.internal", "instance-data", "kubernetes.default"
-  ];
-  if (forbiddenHosts.includes(lower)) return false;
-
-  if (
-    /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.)/.test(lower)
-  ) {
-    return false;
-  }
-
-  if (lower.endsWith(".local") || lower.endsWith(".internal") || lower.endsWith(".arpa") || lower.endsWith(".lan") || lower.endsWith(".localhost")) {
-    return false;
-  }
-
-  if (lower.startsWith("[") && lower.endsWith("]")) {
-    const unbracketed = lower.slice(1, -1);
-    if (unbracketed === "::1" || unbracketed.startsWith("fc") || unbracketed.startsWith("fd") || unbracketed.startsWith("fe80")) {
-      return false;
-    }
-  }
-
-  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(lower);
-}
-
-function isSafeUrl(urlStr: string): boolean {
-  if (!urlStr || typeof urlStr !== "string") return false;
-  const trimmed = urlStr.trim().toLowerCase();
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
-  try {
-    const parsed = new URL(trimmed);
-    return isSafeDomain(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function escapeHtml(str: string): string {
-  if (!str) return "";
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
 async function invalidateCache(env: Env) {
   if (env.CACHE_KV) {
     try {
@@ -294,13 +258,37 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
   const path = url.pathname;
   const method = request.method;
 
-  const corsHeaders = {
+  // Strict CORS Header Resolver: Restrict to origin if domain matches host or allowed list
+  const origin = request.headers.get("Origin") || "";
+  let allowOrigin = "";
+  if (origin) {
+    try {
+      const originUrl = new URL(origin);
+      if (originUrl.host === url.host) {
+        allowOrigin = origin;
+      } else if (env.ALLOWED_ORIGINS) {
+        const allowedList = env.ALLOWED_ORIGINS.split(",").map((s: string) => s.trim());
+        if (allowedList.includes(origin)) {
+          allowOrigin = origin;
+        }
+      }
+    } catch {}
+  }
+
+  const corsHeaders: Record<string, string> = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
+    "Vary": "Origin"
   };
+  if (allowOrigin) {
+    corsHeaders["Access-Control-Allow-Origin"] = allowOrigin;
+    corsHeaders["Access-Control-Allow-Credentials"] = "true";
+  } else {
+    // For non-credentialed public GET resources, provide host origin
+    corsHeaders["Access-Control-Allow-Origin"] = origin ? origin : "*";
+  }
 
   if (method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -397,21 +385,47 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         }
       }
 
-      const hashedInput = await hashPassword(password || "");
-      if (hashedInput === storedHash) {
+      const { valid, needsUpgrade } = await verifyPasswordPBKDF2(password || "", storedHash);
+      if (valid) {
         clearLoginFailures(clientIp);
-        const token = "omni-admin-token-" + Array.from(crypto.getRandomValues(new Uint8Array(24))).map(b => b.toString(16).padStart(2, "0")).join("");
-        const expiresAt = new Date(Date.now() + 86400000 * 7).toISOString();
+
+        // Auto-upgrade legacy hash to PBKDF2 if applicable
+        if (needsUpgrade && d1Bound) {
+          const upgradedHash = await hashPasswordPBKDF2(password);
+          await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(upgradedHash)).run();
+        }
+
+        const token = generateSecureToken();
+        const expiresAt = Date.now() + 86400000 * 7; // 7 days expiration in ms
         if (d1Bound) {
           try {
             await env.DB!.prepare("INSERT OR REPLACE INTO admin_sessions (token, expiresAt) VALUES (?, ?)").bind(token, expiresAt).run();
           } catch {}
         }
-        return new Response(JSON.stringify({ success: true, token }), { headers: corsHeaders });
+        return new Response(JSON.stringify({ success: true, token, expiresAt }), { headers: corsHeaders });
       }
 
       recordLoginFailure(clientIp);
       return new Response(JSON.stringify({ success: false, error: "管理员密码错误，请重新输入" }), { status: 401, headers: corsHeaders });
+    }
+
+    // 3.1 Admin Logout
+    if (path === "/api/auth/logout" && method === "POST") {
+      const authHeader = request.headers.get("Authorization");
+      const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+      if (token && d1Bound) {
+        try {
+          await env.DB!.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
+        } catch {}
+      }
+      return new Response(JSON.stringify({ success: true, message: "已安全退出登录" }), { headers: corsHeaders });
+    }
+
+    // 3.2 Verify Current Admin Session Status
+    if (path === "/api/auth/me" && method === "GET") {
+      const authErr = await requireAuth(request, env);
+      if (authErr) return authErr;
+      return new Response(JSON.stringify({ success: true, authenticated: true, role: "admin" }), { headers: corsHeaders });
     }
 
     // 4. Get Public Settings
@@ -422,7 +436,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         defaultViewMode: "grid",
         enableWeather: true,
         enableSearchEngine: true,
-        defaultSearchEngine: "baidu"
+        defaultSearchEngine: "google"
       };
 
       if (d1Bound) {
@@ -454,21 +468,27 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       const { currentPassword, newPassword, ...rest } = body;
 
       if (newPassword) {
+        if (!currentPassword) {
+          return new Response(JSON.stringify({ error: "修改密码必须提供当前管理员密码" }), { status: 401, headers: corsHeaders });
+        }
         let storedHash = "";
         const row = await env.DB!.prepare("SELECT value FROM settings WHERE key = 'adminPasswordHash'").first<any>();
         if (row && row.value) {
           try { storedHash = JSON.parse(row.value); } catch { storedHash = row.value; }
         }
 
-        const hashedCurrent = await hashPassword(currentPassword || "");
-        if (hashedCurrent !== storedHash) {
+        const { valid } = await verifyPasswordPBKDF2(currentPassword, storedHash);
+        if (!valid) {
           return new Response(JSON.stringify({ error: "当前管理员密码不正确" }), { status: 401, headers: corsHeaders });
         }
         if (typeof newPassword !== "string" || newPassword.length < 6) {
           return new Response(JSON.stringify({ error: "新密码长度不能少于 6 位" }), { status: 400, headers: corsHeaders });
         }
-        const newHash = await hashPassword(newPassword);
+        const newHash = await hashPasswordPBKDF2(newPassword);
         await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(newHash)).run();
+        
+        // Security fix: Invalidate ALL active admin sessions on password change
+        await env.DB!.prepare("DELETE FROM admin_sessions").run();
       }
 
       const allowedKeys = [
@@ -938,102 +958,173 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       const body: any = await request.json().catch(() => ({}));
       const { type, content, mode = "merge" } = body;
 
+      const IMPORT_SETTINGS_WHITELIST = new Set([
+        "siteName", "siteSubtitle", "announcement", "defaultViewMode",
+        "enableWeather", "enableSearchEngine", "defaultSearchEngine"
+      ]);
+
       try {
         if (type === "json") {
           const parsed = typeof content === "string" ? JSON.parse(content) : content;
-          if (parsed.settings) {
-            delete parsed.settings.adminPasswordHash;
-            for (const [k, v] of Object.entries(parsed.settings)) {
-              await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, JSON.stringify(v)).run();
+          
+          if (mode === "replace") {
+            // True replace: clear existing bookmarks and categories
+            await env.DB!.prepare("DELETE FROM bookmarks").run();
+            await env.DB!.prepare("DELETE FROM categories").run();
+
+            if (Array.isArray(parsed.categories)) {
+              for (const [idx, c] of parsed.categories.entries()) {
+                const catId = c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                await env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
+                  .bind(catId, String(c.name || "未命名分类").substring(0, 50), String(c.icon || "Folder").substring(0, 30), typeof c.sortOrder === "number" ? c.sortOrder : idx + 1, String(c.description || "").substring(0, 200)).run();
+              }
             }
-          }
-          if (Array.isArray(parsed.categories)) {
-            for (const c of parsed.categories) {
-              await env.DB!.prepare("INSERT OR REPLACE INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
-                .bind(c.id, c.name, c.icon || "Folder", c.sortOrder || 99, c.description || "").run();
-            }
-          }
-          if (Array.isArray(parsed.bookmarks)) {
-            for (const b of parsed.bookmarks) {
-              if (b.url && isSafeUrl(b.url)) {
-                if (mode === "replace") {
-                  await env.DB!.prepare("INSERT OR REPLACE INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                    .bind(b.id, b.title, b.url, b.description || "", b.categoryId || "cat-1", b.icon || "", JSON.stringify(b.tags || []), b.clicks || 0, b.sortOrder || 99, b.isPinned ? 1 : 0, b.createdAt || new Date().toISOString()).run();
-                } else {
-                  const existing = await env.DB!.prepare("SELECT id FROM bookmarks WHERE url = ?").bind(b.url).first<any>();
-                  if (!existing) {
-                    await env.DB!.prepare("INSERT OR REPLACE INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                      .bind(b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6), b.title, b.url, b.description || "", b.categoryId || "cat-1", b.icon || "", JSON.stringify(b.tags || []), b.clicks || 0, b.sortOrder || 99, b.isPinned ? 1 : 0, b.createdAt || new Date().toISOString()).run();
-                  }
+
+            if (Array.isArray(parsed.bookmarks)) {
+              for (const [idx, b] of parsed.bookmarks.entries()) {
+                if (b.url && isSafeUrl(b.url)) {
+                  const bmId = b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                  await env.DB!.prepare("INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    .bind(
+                      bmId,
+                      String(b.title || b.url).substring(0, 150),
+                      String(b.url).substring(0, 2000),
+                      String(b.description || "").substring(0, 500),
+                      b.categoryId || "cat-1",
+                      b.icon || "",
+                      JSON.stringify(Array.isArray(b.tags) ? b.tags.slice(0, 10) : []),
+                      typeof b.clicks === "number" ? b.clicks : 0,
+                      typeof b.sortOrder === "number" ? b.sortOrder : idx + 1,
+                      b.isPinned ? 1 : 0,
+                      b.createdAt || new Date().toISOString()
+                    ).run();
                 }
               }
             }
-          }
-          await invalidateCache(env);
-          return new Response(JSON.stringify({ success: true, message: "JSON 备份数据已成功导入" }), { headers: corsHeaders });
-        } else if (type === "html") {
-          let importedCount = 0;
-          let currentFolder = "浏览器导入";
-          const lines = String(content).split(/\r?\n/);
 
-          for (const line of lines) {
-            const folderMatch = /<H3[^>]*>(.*?)<\/H3>/i.exec(line);
-            if (folderMatch && folderMatch[1]) {
-              const folderName = folderMatch[1].replace(/<[^>]*>/g, "").trim();
-              if (folderName && folderName !== "Bookmarks" && folderName !== "书签栏") {
-                currentFolder = folderName.substring(0, 50);
+            if (parsed.settings && typeof parsed.settings === "object") {
+              for (const [k, v] of Object.entries(parsed.settings)) {
+                if (IMPORT_SETTINGS_WHITELIST.has(k) && k !== "__proto__" && k !== "constructor") {
+                  await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, JSON.stringify(v)).run();
+                }
+              }
+            }
+          } else {
+            // Merge mode: O(1) deduplication
+            const existingUrls = new Set<string>();
+            try {
+              const bRes = await env.DB!.prepare("SELECT url FROM bookmarks").all();
+              bRes.results?.forEach((r: any) => { if (r.url) existingUrls.add(r.url); });
+            } catch {}
+
+            const existingCats = new Map<string, string>();
+            try {
+              const cRes = await env.DB!.prepare("SELECT id, name FROM categories").all();
+              cRes.results?.forEach((r: any) => { if (r.name) existingCats.set(r.name, r.id); });
+            } catch {}
+
+            if (Array.isArray(parsed.categories)) {
+              for (const c of parsed.categories) {
+                if (!existingCats.has(c.name)) {
+                  const maxCatRes = await env.DB!.prepare("SELECT MAX(sortOrder) as maxSort FROM categories").first<any>();
+                  const maxSort = maxCatRes && typeof maxCatRes.maxSort === "number" ? maxCatRes.maxSort : 0;
+                  const catId = c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                  await env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
+                    .bind(catId, String(c.name || "未命名分类").substring(0, 50), String(c.icon || "Folder").substring(0, 30), maxSort + 1, String(c.description || "").substring(0, 200)).run();
+                  existingCats.set(c.name, catId);
+                }
               }
             }
 
-            const linkMatch = /<A\s+[^>]*?HREF=["']([^"']*)["'][^>]*>(.*?)<\/A>/i.exec(line);
-            if (linkMatch && linkMatch[1]) {
-              const url = linkMatch[1].trim();
-              const rawTitle = linkMatch[2] ? linkMatch[2].replace(/<[^>]*>/g, "").trim() : "";
-              const title = rawTitle || url;
-
-              if (isSafeUrl(url)) {
-                const existingBm = await env.DB!.prepare("SELECT id FROM bookmarks WHERE url = ?").bind(url).first<any>();
-                if (!existingBm) {
-                  let targetCat = await env.DB!.prepare("SELECT * FROM categories WHERE name = ?").bind(currentFolder).first<any>();
-                  if (!targetCat) {
-                    const maxCatRes = await env.DB!.prepare("SELECT MAX(sortOrder) as maxSort FROM categories").first<any>();
-                    const maxSortCat = maxCatRes && typeof maxCatRes.maxSort === "number" ? maxCatRes.maxSort : 0;
-                    const newCatId = "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-                    await env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
-                      .bind(newCatId, currentFolder, "Folder", maxSortCat + 1, "从浏览器导入的分类目录").run();
-                    targetCat = { id: newCatId };
-                  }
-
+            if (Array.isArray(parsed.bookmarks)) {
+              for (const b of parsed.bookmarks) {
+                if (b.url && isSafeUrl(b.url) && !existingUrls.has(b.url)) {
                   const maxBmRes = await env.DB!.prepare("SELECT MAX(sortOrder) as maxSort FROM bookmarks").first<any>();
-                  const maxSortBm = maxBmRes && typeof maxBmRes.maxSort === "number" ? maxBmRes.maxSort : 0;
-
-                  const newBmId = "bm-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-                  let favicon = "";
-                  try {
-                    const parsed = new URL(url);
-                    if (isSafeDomain(parsed.hostname)) favicon = `/api/icon-proxy?domain=${parsed.hostname}`;
-                  } catch {}
-
-                  await env.DB!.prepare(`
-                    INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  `).bind(
-                    newBmId,
-                    title.substring(0, 150),
-                    url.substring(0, 2000),
-                    "从浏览器书签导入",
-                    targetCat.id,
-                    favicon,
-                    JSON.stringify(["浏览器导入"]),
-                    0,
-                    maxSortBm + 1,
-                    0,
-                    new Date().toISOString()
-                  ).run();
-                  importedCount++;
+                  const maxSort = maxBmRes && typeof maxBmRes.maxSort === "number" ? maxBmRes.maxSort : 0;
+                  const bmId = b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                  await env.DB!.prepare("INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    .bind(
+                      bmId,
+                      String(b.title || b.url).substring(0, 150),
+                      String(b.url).substring(0, 2000),
+                      String(b.description || "").substring(0, 500),
+                      b.categoryId || "cat-1",
+                      b.icon || "",
+                      JSON.stringify(Array.isArray(b.tags) ? b.tags.slice(0, 10) : []),
+                      typeof b.clicks === "number" ? b.clicks : 0,
+                      maxSort + 1,
+                      b.isPinned ? 1 : 0,
+                      b.createdAt || new Date().toISOString()
+                    ).run();
+                  existingUrls.add(b.url);
                 }
               }
             }
+          }
+
+          await invalidateCache(env);
+          return new Response(JSON.stringify({ success: true, message: "JSON 备份数据已成功安全导入" }), { headers: corsHeaders });
+        } else if (type === "html") {
+          // Parse using Netscape bookmark parser with multiline tag support
+          const parsedBookmarks = parseNetscapeBookmarks(String(content));
+          let importedCount = 0;
+
+          const existingUrls = new Set<string>();
+          try {
+            const bRes = await env.DB!.prepare("SELECT url FROM bookmarks").all();
+            bRes.results?.forEach((r: any) => { if (r.url) existingUrls.add(r.url); });
+          } catch {}
+
+          const existingCats = new Map<string, string>();
+          try {
+            const cRes = await env.DB!.prepare("SELECT id, name FROM categories").all();
+            cRes.results?.forEach((r: any) => { if (r.name) existingCats.set(r.name, r.id); });
+          } catch {}
+
+          for (const item of parsedBookmarks) {
+            if (!isSafeUrl(item.url) || existingUrls.has(item.url)) continue;
+
+            let catId = existingCats.get(item.categoryName);
+            if (!catId) {
+              const maxCatRes = await env.DB!.prepare("SELECT MAX(sortOrder) as maxSort FROM categories").first<any>();
+              const maxSort = maxCatRes && typeof maxCatRes.maxSort === "number" ? maxCatRes.maxSort : 0;
+              catId = "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+              await env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
+                .bind(catId, item.categoryName, "Folder", maxSort + 1, "从浏览器导入的分类目录").run();
+              existingCats.set(item.categoryName, catId);
+            }
+
+            const maxBmRes = await env.DB!.prepare("SELECT MAX(sortOrder) as maxSort FROM bookmarks").first<any>();
+            const maxSortBm = maxBmRes && typeof maxBmRes.maxSort === "number" ? maxBmRes.maxSort : 0;
+            const newBmId = "bm-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+
+            let favicon = item.icon || "";
+            if (!favicon) {
+              try {
+                const parsed = new URL(item.url);
+                if (isSafeDomain(parsed.hostname)) favicon = `/api/icon-proxy?domain=${parsed.hostname}`;
+              } catch {}
+            }
+
+            await env.DB!.prepare(`
+              INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              newBmId,
+              item.title.substring(0, 150),
+              item.url.substring(0, 2000),
+              item.description || "从浏览器书签导入",
+              catId,
+              favicon,
+              JSON.stringify(["浏览器导入"]),
+              0,
+              maxSortBm + 1,
+              0,
+              new Date().toISOString()
+            ).run();
+
+            existingUrls.add(item.url);
+            importedCount++;
           }
 
           await invalidateCache(env);
@@ -1046,7 +1137,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       }
     }
 
-    // 11. URL Metadata Preview (SSRF Protected)
+    // 11. URL Metadata Preview (SSRF Protected with Manual Redirect Loop)
     if (path === "/api/metadata" && method === "GET") {
       const targetUrl = url.searchParams.get("url");
       if (!targetUrl) return new Response(JSON.stringify({ error: "URL 不能为空" }), { status: 400, headers: corsHeaders });
@@ -1061,18 +1152,38 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
       try {
-        const response = await fetch(normalized, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml"
-          },
-          signal: controller.signal,
-          redirect: "error"
-        });
+        let currentUrl = normalized;
+        let response: Response | null = null;
 
-        if (!response.ok) {
+        // Manual redirect validation (max 3 hops)
+        for (let hop = 0; hop < 3; hop++) {
+          const resp = await fetch(currentUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml"
+            },
+            signal: controller.signal,
+            redirect: "manual"
+          });
+
+          if ([301, 302, 303, 307, 308].includes(resp.status)) {
+            const location = resp.headers.get("Location");
+            if (!location) break;
+            const nextUrl = new URL(location, currentUrl).toString();
+            if (!isSafeUrl(nextUrl)) {
+              return new Response(JSON.stringify({ error: "重定向到不安全或受限制的目标网址" }), { status: 400, headers: corsHeaders });
+            }
+            currentUrl = nextUrl;
+            continue;
+          }
+
+          response = resp;
+          break;
+        }
+
+        if (!response || !response.ok) {
           let hostname = "";
           try { hostname = new URL(normalized).hostname.replace(/^www\./, ""); } catch {}
           return new Response(JSON.stringify({ title: "", description: "", image: "", hostname, url: normalized }), { headers: corsHeaders });
@@ -1119,14 +1230,14 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         if (image && !isSafeUrl(image)) image = "";
 
         let hostname = "";
-        try { hostname = new URL(normalized).hostname.replace(/^www\./, ""); } catch {}
+        try { hostname = new URL(currentUrl).hostname.replace(/^www\./, ""); } catch {}
 
         return new Response(JSON.stringify({
           title: title.substring(0, 150),
           description: description.substring(0, 220),
           image,
           hostname,
-          url: normalized
+          url: currentUrl
         }), { headers: corsHeaders });
       } catch (err: any) {
         let hostname = "";
