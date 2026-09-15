@@ -88,6 +88,14 @@ export default function App() {
         fetch("/api/settings"),
       ]);
 
+      if (catRes.status === 401 || bmRes.status === 401 || setRes.status === 401) {
+        localStorage.removeItem("omnimark_token");
+        setIsLoggedIn(false);
+        setAuthToken(null);
+        setIsLoginOpen(true);
+        return;
+      }
+
       if (catRes.ok) {
         const catData = await catRes.json();
         setCategories(catData);
@@ -118,6 +126,13 @@ export default function App() {
       setIsLoggedIn(true);
       setAuthToken(token);
     }
+
+    // Polling mechanism (every 15 seconds) to ensure UI state is synchronized with D1 database
+    const pollInterval = setInterval(() => {
+      loadData(false);
+    }, 15000);
+
+    return () => clearInterval(pollInterval);
   }, []);
 
   // Apply dark mode class to html root

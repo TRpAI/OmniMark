@@ -1209,9 +1209,18 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
               <button
                 type="submit"
                 disabled={settingsLoading}
-                className="w-full sm:w-auto h-11 inline-flex items-center justify-center px-8 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-semibold hover:bg-blue-700 transition-colors shadow-sm shadow-blue-500/20 disabled:opacity-50 whitespace-nowrap"
+                className={`w-full sm:w-auto h-11 inline-flex items-center justify-center px-8 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-semibold hover:bg-blue-700 transition-colors shadow-sm shadow-blue-500/20 disabled:opacity-50 whitespace-nowrap gap-2 ${
+                  settingsLoading ? "cursor-wait" : ""
+                }`}
               >
-                {settingsLoading ? "保存配置中..." : "保存系统配置与密钥"}
+                {settingsLoading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>保存配置中...</span>
+                  </>
+                ) : (
+                  <span>保存系统配置与密钥</span>
+                )}
               </button>
             </div>
           </form>

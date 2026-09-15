@@ -346,7 +346,63 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       });
     }
 
-    // 4. Settings Update (PUT /api/settings)
+    // Get Categories (GET /api/categories)
+    if (path === "/api/categories" && method === "GET") {
+      let categories: any[] = [];
+      if (d1Bound) {
+        try {
+          const res = await env.DB.prepare("SELECT * FROM categories ORDER BY sortOrder ASC").all();
+          categories = res.results || [];
+        } catch (e) {}
+      }
+      return new Response(JSON.stringify(categories), { headers: corsHeaders });
+    }
+
+    // Get Bookmarks (GET /api/bookmarks)
+    if (path === "/api/bookmarks" && method === "GET") {
+      let bookmarks: any[] = [];
+      if (d1Bound) {
+        try {
+          const res = await env.DB.prepare("SELECT * FROM bookmarks ORDER BY sortOrder ASC").all();
+          bookmarks = (res.results || []).map((b: any) => ({
+            ...b,
+            tags: typeof b.tags === "string" ? JSON.parse(b.tags) : (b.tags || []),
+            isPinned: Boolean(b.isPinned),
+          }));
+        } catch (e) {}
+      }
+      return new Response(JSON.stringify(bookmarks), { headers: corsHeaders });
+    }
+
+    // 4. Get Public Settings (GET /api/settings)
+    if (path === "/api/settings" && method === "GET") {
+      let settingsObj: any = {
+        siteName: "OmniMark 站点导航",
+        siteSubtitle: "极简优雅的前后端分离导航与书签系统",
+        defaultViewMode: "grid",
+        enableWeather: true,
+        enableSearchEngine: true,
+        defaultSearchEngine: "baidu"
+      };
+
+      if (d1Bound) {
+        try {
+          const settingsRes = await env.DB.prepare("SELECT * FROM settings").all();
+          settingsRes.results?.forEach((row: any) => {
+            try {
+              settingsObj[row.key] = JSON.parse(row.value);
+            } catch {
+              settingsObj[row.key] = row.value;
+            }
+          });
+        } catch (e) {}
+      }
+
+      const { adminPasswordHash, ...safeSettings } = settingsObj;
+      return new Response(JSON.stringify(safeSettings), { headers: corsHeaders });
+    }
+
+    // 5. Settings Update (PUT /api/settings)
     if (path === "/api/settings" && method === "PUT") {
       const body: any = await request.json().catch(() => ({}));
       const { currentPassword, newPassword, ...rest } = body;
@@ -762,6 +818,14 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           let importedCount = 0;
           let currentFolder = "浏览器导入";
 
+          const folderIdMap = new Map<string, string>();
+          const existingCats = await env.DB.prepare("SELECT id, name FROM categories").all();
+          if (existingCats.results) {
+            for (const c of existingCats.results as any[]) {
+              folderIdMap.set(c.name, c.id);
+            }
+          }
+
           const lines = String(content).split(/\r?\n/);
           for (const line of lines) {
             const folderMatch = /<H3[^>]*>(.*?)<\/H3>/i.exec(line);
@@ -779,11 +843,15 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
               const title = rawTitle || urlStr;
 
               if (urlStr.startsWith("http://") || urlStr.startsWith("https://")) {
-                let catId = "cat-imp-" + currentFolder.toLowerCase().replace(/[^a-z0-9]/g, "");
-                await env.DB.prepare(`
-                  INSERT OR IGNORE INTO categories (id, name, icon, sortOrder, description)
-                  VALUES (?, ?, 'Folder', 50, '从浏览器导入的分类')
-                `).bind(catId, currentFolder).run();
+                let catId = folderIdMap.get(currentFolder);
+                if (!catId) {
+                  catId = "cat-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                  folderIdMap.set(currentFolder, catId);
+                  await env.DB.prepare(`
+                    INSERT OR IGNORE INTO categories (id, name, icon, sortOrder, description)
+                    VALUES (?, ?, 'Folder', 50, '从浏览器导入的分类')
+                  `).bind(catId, currentFolder).run();
+                }
 
                 const bmId = "bm-html-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
                 let hostname = "example.com";
