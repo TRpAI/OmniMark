@@ -984,8 +984,8 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
 
       {/* Tab 4: System Settings & Secret Keys */}
       {activeTab === 'settings' && (
-        <div className="w-full bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 p-4 sm:p-6 lg:p-8 rounded-2xl sm:rounded-3xl shadow-sm transition-all">
-          <form onSubmit={handleSaveSettings} className="space-y-6 max-w-4xl">
+        <div className="w-full max-w-full overflow-hidden bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 p-4 sm:p-6 lg:p-8 rounded-2xl sm:rounded-3xl shadow-sm transition-all box-border">
+          <form onSubmit={handleSaveSettings} className="space-y-6 w-full max-w-full box-border">
             <div className="border-b pb-3 border-slate-100 dark:border-slate-800">
               <h3 className="font-bold text-base sm:text-lg text-slate-900 dark:text-slate-100">
                 系统配置与云端安全密钥

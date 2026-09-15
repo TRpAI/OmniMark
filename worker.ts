@@ -610,6 +610,232 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return Response.redirect(googleFaviconUrl, 302);
     }
 
+    // 9. Plugin Capture (POST /api/plugin/capture)
+    if (path === "/api/plugin/capture" && method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const { url: targetUrl, title, description, categoryId, tags } = body;
+      if (!targetUrl) return new Response(JSON.stringify({ error: "URL 不能为空" }), { status: 400, headers: corsHeaders });
+
+      let normalizedUrl = String(targetUrl).trim();
+      if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+        normalizedUrl = "https://" + normalizedUrl;
+      }
+
+      let finalTitle = title ? String(title).trim().substring(0, 150) : "";
+      if (!finalTitle) {
+        try {
+          finalTitle = new URL(normalizedUrl).hostname;
+        } catch {
+          finalTitle = normalizedUrl.substring(0, 50);
+        }
+      }
+
+      const id = "bm-cap-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+      let hostname = "example.com";
+      try { hostname = new URL(normalizedUrl).hostname; } catch {}
+      const icon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`;
+      const createdAt = new Date().toISOString();
+
+      let targetCatId = categoryId || "default";
+      if (d1Bound) {
+        try {
+          const cats = await env.DB.prepare("SELECT id FROM categories ORDER BY sortOrder ASC LIMIT 1").all();
+          if (cats.results && cats.results.length > 0) {
+            targetCatId = (cats.results[0] as any).id;
+          }
+          await env.DB.prepare(`
+            INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 9999, 0, ?)
+          `).bind(id, finalTitle, normalizedUrl, description || "", targetCatId, icon, JSON.stringify(tags || ["插件采集"]), createdAt).run();
+          await invalidateCache();
+        } catch (e) {}
+      }
+
+      return new Response(JSON.stringify({ success: true, bookmark: { id, title: finalTitle, url: normalizedUrl } }), { headers: corsHeaders });
+    }
+
+    // 10. Export Bookmarks (GET /api/export)
+    if (path === "/api/export" && method === "GET") {
+      const format = url.searchParams.get("format") || "json";
+      let categories: any[] = [];
+      let bookmarks: any[] = [];
+      let settingsObj: any = {};
+
+      if (d1Bound) {
+        try {
+          const [catsRes, bmsRes, settingsRes] = await Promise.all([
+            env.DB.prepare("SELECT * FROM categories ORDER BY sortOrder ASC").all(),
+            env.DB.prepare("SELECT * FROM bookmarks ORDER BY sortOrder ASC").all(),
+            env.DB.prepare("SELECT * FROM settings").all()
+          ]);
+          categories = catsRes.results || [];
+          bookmarks = bmsRes.results || [];
+          settingsRes.results?.forEach((r: any) => {
+            try { settingsObj[r.key] = JSON.parse(r.value); } catch { settingsObj[r.key] = r.value; }
+          });
+        } catch (e) {}
+      }
+
+      if (format === "html") {
+        let html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n`;
+        html += `<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n`;
+        html += `<TITLE>OmniMark Bookmarks Export</TITLE>\n`;
+        html += `<H1>Bookmarks</H1>\n`;
+        html += `<DL><p>\n`;
+
+        for (const cat of categories) {
+          html += `    <DT><H3 ADD_DATE="${Math.floor(Date.now() / 1000)}">${cat.name}</H3>\n`;
+          html += `    <DL><p>\n`;
+          const catBms = bookmarks.filter((b: any) => b.categoryId === cat.id);
+          for (const bm of catBms) {
+            html += `        <DT><A HREF="${bm.url}" ADD_DATE="${Math.floor(Date.now() / 1000)}" ICON="${bm.icon || ''}">${bm.title}</A>\n`;
+            if (bm.description) {
+              html += `        <DD>${bm.description}\n`;
+            }
+          }
+          html += `    </DL><p>\n`;
+        }
+        html += `</DL><p>\n`;
+
+        return new Response(html, {
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="bookmarks_export.html"'
+          }
+        });
+      } else {
+        const backupData = { categories, bookmarks, settings: settingsObj };
+        return new Response(JSON.stringify(backupData, null, 2), {
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="omnimark_backup.json"'
+          }
+        });
+      }
+    }
+
+    // 11. Import Bookmarks (POST /api/import)
+    if (path === "/api/import" && method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const { type, content, mode = "merge" } = body;
+
+      if (!d1Bound) {
+        return new Response(JSON.stringify({ error: "Cloudflare D1 数据库未绑定，无法执行导入。" }), { status: 500, headers: corsHeaders });
+      }
+
+      try {
+        if (type === "json") {
+          const parsed = typeof content === "string" ? JSON.parse(content) : content;
+          if (parsed.categories && Array.isArray(parsed.categories)) {
+            for (const c of parsed.categories) {
+              await env.DB.prepare(`
+                INSERT OR REPLACE INTO categories (id, name, icon, sortOrder, description)
+                VALUES (?, ?, ?, ?, ?)
+              `).bind(c.id || "cat-" + Date.now(), c.name || "导入分类", c.icon || "Folder", c.sortOrder || 99, c.description || "").run();
+            }
+          }
+          if (parsed.bookmarks && Array.isArray(parsed.bookmarks)) {
+            for (const b of parsed.bookmarks) {
+              await env.DB.prepare(`
+                INSERT OR REPLACE INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                b.id || "bm-" + Date.now(),
+                b.title || "未命名",
+                b.url || "https://example.com",
+                b.description || "",
+                b.categoryId || "default",
+                b.icon || "",
+                JSON.stringify(b.tags || []),
+                b.clicks || 0,
+                b.sortOrder || 99,
+                b.isPinned ? 1 : 0,
+                b.createdAt || new Date().toISOString()
+              ).run();
+            }
+          }
+          await invalidateCache();
+          return new Response(JSON.stringify({ success: true, message: "JSON 备份数据已成功导入并同步至 D1 数据库！" }), { headers: corsHeaders });
+        } else if (type === "html") {
+          let importedCount = 0;
+          let currentFolder = "浏览器导入";
+
+          const lines = String(content).split(/\r?\n/);
+          for (const line of lines) {
+            const folderMatch = /<H3[^>]*>(.*?)<\/H3>/i.exec(line);
+            if (folderMatch && folderMatch[1]) {
+              const folderName = folderMatch[1].trim();
+              if (folderName && folderName !== "Bookmarks" && folderName !== "书签栏") {
+                currentFolder = folderName.substring(0, 50);
+              }
+            }
+
+            const linkMatch = /<A\s+[^>]*?HREF=["']([^"']*)["'][^>]*>(.*?)<\/A>/i.exec(line);
+            if (linkMatch && linkMatch[1]) {
+              const urlStr = linkMatch[1].trim();
+              const rawTitle = linkMatch[2] ? linkMatch[2].replace(/<[^>]*>/g, "").trim() : "";
+              const title = rawTitle || urlStr;
+
+              if (urlStr.startsWith("http://") || urlStr.startsWith("https://")) {
+                let catId = "cat-imp-" + currentFolder.toLowerCase().replace(/[^a-z0-9]/g, "");
+                await env.DB.prepare(`
+                  INSERT OR IGNORE INTO categories (id, name, icon, sortOrder, description)
+                  VALUES (?, ?, 'Folder', 50, '从浏览器导入的分类')
+                `).bind(catId, currentFolder).run();
+
+                const bmId = "bm-html-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+                let hostname = "example.com";
+                try { hostname = new URL(urlStr).hostname; } catch {}
+                const icon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`;
+                
+                await env.DB.prepare(`
+                  INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, 0, 99, 0, ?)
+                `).bind(
+                  bmId,
+                  title.substring(0, 150),
+                  urlStr.substring(0, 2000),
+                  "从浏览器书签导入",
+                  catId,
+                  icon,
+                  JSON.stringify(["浏览器导入"]),
+                  new Date().toISOString()
+                ).run();
+                importedCount++;
+              }
+            }
+          }
+
+          await invalidateCache();
+          return new Response(JSON.stringify({ 
+            success: true, 
+            message: `成功解析并导入 ${importedCount} 个浏览器书签，已自动写入 D1 数据库并按文件夹归类！` 
+          }), { headers: corsHeaders });
+        } else {
+          return new Response(JSON.stringify({ error: "不支持的导入格式类型" }), { status: 400, headers: corsHeaders });
+        }
+      } catch (err: any) {
+        return new Response(JSON.stringify({ error: "导入处理失败: " + err.message }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // 12. Docs Spec (GET /api/docs-spec)
+    if (path === "/api/docs-spec" && method === "GET") {
+      return new Response(JSON.stringify({
+        title: "OmniMark Cloudflare Worker API 规范",
+        version: "1.2.0",
+        baseUrl: "/api",
+        endpoints: [
+          { method: "GET", path: "/api/icon-proxy", description: "Favicon 图标代理抓取" },
+          { method: "GET", path: "/api/export", description: "导出全量书签数据" },
+          { method: "POST", path: "/api/import", description: "导入书签" },
+          { method: "POST", path: "/api/plugin/capture", description: "插件一键采集" }
+        ]
+      }), { headers: corsHeaders });
+    }
+
     return new Response(JSON.stringify({ error: "API route not found", path }), {
       status: 404,
       headers: corsHeaders,
