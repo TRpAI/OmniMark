@@ -13,13 +13,13 @@ ENVIRONMENT = "production"
 # 2. KV 命名空间绑定 -> 变量名: CACHE_KV
 # =========================================================================
 
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "omnimark-db"
-# database_id = "填写您的D1数据库UUID"
+[[d1_databases]]
+binding = "DB"
+database_name = "omnimark-d1"
+database_id = "82ebf74d-0134-492c-a8cd-a418dfc79a04"
 
-# [[kv_namespaces]]
-# binding = "CACHE_KV"
-# id = "填写您的KV命名空间ID"
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "a37e2404786748aca66083ac1bc32c9c"
 
 
