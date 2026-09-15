@@ -4,6 +4,10 @@
  * sanitizes hostnames, and provides reliable clipboard operations for sandboxed iframes.
  */
 
+import { isSafeUrl, isSafeDomain, isSafePort } from "./security";
+
+export { isSafeUrl, isSafeDomain, isSafePort };
+
 /**
  * Returns a sanitized, safe URL for use in href attributes.
  * Rejects javascript:, data:, and other executable URI schemes.
@@ -37,11 +41,12 @@ export function getSafeHref(urlStr?: string | null): string {
   }
 
   // Standardize web URLs: ensure http:// or https://
+  let normalized = trimmed;
   if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
-    return `https://${trimmed}`;
+    normalized = `https://${trimmed}`;
   }
 
-  return trimmed;
+  return isSafeUrl(normalized) ? normalized : "#";
 }
 
 /**
@@ -67,21 +72,19 @@ export function safeGetHostname(urlStr?: string | null): string {
 
 /**
  * Validates whether an input string is a valid web URL (http or https).
+ * Uses canonical isSafeUrl to ensure identical frontend/backend checks.
  */
 export function isValidWebUrl(urlStr?: string | null): boolean {
   if (!urlStr || typeof urlStr !== "string") return false;
-  const trimmed = urlStr.trim().toLowerCase();
-  if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:")) return false;
+  let trimmed = urlStr.trim();
+  if (!trimmed) return false;
+  if (trimmed.toLowerCase().startsWith("javascript:") || trimmed.toLowerCase().startsWith("data:")) return false;
 
-  try {
-    const formatted = trimmed.startsWith("http://") || trimmed.startsWith("https://")
-      ? trimmed
-      : `https://${trimmed}`;
-    const parsed = new URL(formatted);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+    trimmed = `https://${trimmed}`;
   }
+
+  return isSafeUrl(trimmed);
 }
 
 /**

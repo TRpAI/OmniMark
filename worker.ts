@@ -13,7 +13,13 @@ import {
   isSafeDomain,
   isSafeUrl,
   parseNetscapeBookmarks,
-  escapeHtml
+  escapeHtml,
+  PUBLIC_SETTINGS_KEYS,
+  CLICK_ROUTE_REGEX,
+  CATEGORY_ITEM_ROUTE_REGEX,
+  BOOKMARK_ITEM_ROUTE_REGEX,
+  parseSessionExpiresAt,
+  isSessionValid
 } from "./src/utils/security.ts";
 
 // Default PBKDF2 hash for initial installation (admin123, 100,000 iterations, 32-byte salt)
@@ -23,6 +29,7 @@ declare global {
   interface D1Database {
     prepare(query: string): D1PreparedStatement;
     exec(query: string): Promise<any>;
+    batch<T = any>(statements: D1PreparedStatement[]): Promise<T[]>;
   }
   interface D1PreparedStatement {
     bind(...values: any[]): D1PreparedStatement;
@@ -199,9 +206,8 @@ async function requireAuth(request: Request, env: Env): Promise<Response | null>
       });
     }
 
-    const expiresAt = typeof session.expiresAt === "number" ? session.expiresAt : parseInt(session.expiresAt, 10);
-    if (!isNaN(expiresAt) && expiresAt <= Date.now()) {
-      await env.DB.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
+    if (!isSessionValid(session)) {
+      await env.DB!.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
       return new Response(JSON.stringify({ error: "登录会话已过期，请重新登录" }), {
         status: 401,
         headers: { "Content-Type": "application/json" }
@@ -285,13 +291,23 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
   if (allowOrigin) {
     corsHeaders["Access-Control-Allow-Origin"] = allowOrigin;
     corsHeaders["Access-Control-Allow-Credentials"] = "true";
-  } else {
-    // For non-credentialed public GET resources, provide host origin
-    corsHeaders["Access-Control-Allow-Origin"] = origin ? origin : "*";
   }
+  // When origin is not permitted, strictly omit Access-Control-Allow-Origin instead of reflecting arbitrary origin
 
   if (method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    if (origin && !allowOrigin) {
+      return new Response(null, { status: 403 });
+    }
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  // Request body payload size limit (10MB)
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) {
+    return new Response(JSON.stringify({ error: "请求数据包过大，最大允许 10MB" }), {
+      status: 413,
+      headers: corsHeaders
+    });
   }
 
   let activeD1 = isRealD1(env?.DB) ? env.DB : (isRealD1(env?.db) ? env.db : (isRealD1(env?.D1) ? env.D1 : (isRealD1(env?.DATABASE) ? env.DATABASE : null)));
@@ -428,7 +444,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true, authenticated: true, role: "admin" }), { headers: corsHeaders });
     }
 
-    // 4. Get Public Settings
+    // 4. Get Settings (Whitelisted for Public, Full Safe for Admin)
     if (path === "/api/settings" && method === "GET") {
       let settingsObj: any = {
         siteName: "OmniMark 站点导航",
@@ -454,7 +470,32 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       }
 
       delete settingsObj.adminPasswordHash;
-      return new Response(JSON.stringify(settingsObj), { headers: corsHeaders });
+
+      // Check if request is from an authenticated admin
+      const authHeader = request.headers.get("Authorization");
+      const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+      let isAdmin = false;
+      if (token && d1Bound) {
+        try {
+          const session = await env.DB!.prepare("SELECT token, expiresAt FROM admin_sessions WHERE token = ?").bind(token).first<any>();
+          if (session && isSessionValid(session)) {
+            isAdmin = true;
+          }
+        } catch {}
+      }
+
+      if (isAdmin) {
+        return new Response(JSON.stringify(settingsObj), { headers: corsHeaders });
+      }
+
+      // Public visitors: Whitelist public fields only
+      const publicSettings: Record<string, any> = {};
+      for (const key of PUBLIC_SETTINGS_KEYS) {
+        if (settingsObj[key] !== undefined) {
+          publicSettings[key] = settingsObj[key];
+        }
+      }
+      return new Response(JSON.stringify(publicSettings), { headers: corsHeaders });
     }
 
     // 5. Update Settings (PUT /api/settings) - Protected & Whitelisted
@@ -546,11 +587,13 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true, id, name: safeName, icon: safeIcon, sortOrder: maxSort + 1, description: safeDesc }), { headers: corsHeaders });
     }
 
-    if (path.startsWith("/api/categories/") && method === "PUT") {
+    const catItemMatch = path.match(CATEGORY_ITEM_ROUTE_REGEX);
+
+    if (catItemMatch && method === "PUT") {
       const authErr = await requireAuth(request, env);
       if (authErr) return authErr;
 
-      const catId = path.replace("/api/categories/", "");
+      const catId = catItemMatch[1];
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
 
       const body: any = await request.json().catch(() => ({}));
@@ -568,11 +611,11 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true, id: catId, name, icon, description }), { headers: corsHeaders });
     }
 
-    if (path.startsWith("/api/categories/") && method === "DELETE") {
+    if (catItemMatch && method === "DELETE") {
       const authErr = await requireAuth(request, env);
       if (authErr) return authErr;
 
-      const catId = path.replace("/api/categories/", "");
+      const catId = catItemMatch[1];
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
 
       const allCats = await env.DB!.prepare("SELECT * FROM categories ORDER BY sortOrder ASC").all();
@@ -584,8 +627,11 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       const fallbackCat = categories.find((c: any) => c.id !== catId);
       const fallbackCatId = fallbackCat ? fallbackCat.id : "cat-1";
 
-      await env.DB!.prepare("DELETE FROM categories WHERE id = ?").bind(catId).run();
-      await env.DB!.prepare("UPDATE bookmarks SET categoryId = ? WHERE categoryId = ?").bind(fallbackCatId, catId).run();
+      const batchStmts = [
+        env.DB!.prepare("DELETE FROM categories WHERE id = ?").bind(catId),
+        env.DB!.prepare("UPDATE bookmarks SET categoryId = ? WHERE categoryId = ?").bind(fallbackCatId, catId)
+      ];
+      await env.DB!.batch(batchStmts);
 
       await invalidateCache(env);
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
@@ -598,10 +644,11 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
       const body: any = await request.json().catch(() => ({}));
       const { orderedIds } = body;
-      if (Array.isArray(orderedIds)) {
-        for (let i = 0; i < orderedIds.length; i++) {
-          await env.DB!.prepare("UPDATE categories SET sortOrder = ? WHERE id = ?").bind(i + 1, orderedIds[i]).run();
-        }
+      if (Array.isArray(orderedIds) && orderedIds.length > 0) {
+        const reorderStmts = orderedIds.map((id: string, idx: number) =>
+          env.DB!.prepare("UPDATE categories SET sortOrder = ? WHERE id = ?").bind(idx + 1, id)
+        );
+        await env.DB!.batch(reorderStmts);
         await invalidateCache(env);
       }
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
@@ -734,11 +781,24 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true, id }), { headers: corsHeaders });
     }
 
-    if (path.startsWith("/api/bookmarks/") && method === "PUT") {
+    // Handle bookmark click tracking first with canonical regex
+    const clickMatch = path.match(CLICK_ROUTE_REGEX);
+    if (clickMatch && method === "POST") {
+      const bmId = clickMatch[1];
+      if (d1Bound) {
+        await env.DB!.prepare("UPDATE bookmarks SET clicks = clicks + 1 WHERE id = ?").bind(bmId).run();
+        await invalidateCache(env);
+      }
+      return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+    }
+
+    const bmItemMatch = path.match(BOOKMARK_ITEM_ROUTE_REGEX);
+
+    if (bmItemMatch && method === "PUT") {
       const authErr = await requireAuth(request, env);
       if (authErr) return authErr;
 
-      const bmId = path.replace("/api/bookmarks/", "");
+      const bmId = bmItemMatch[1];
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
 
       const body: any = await request.json().catch(() => ({}));
@@ -761,7 +821,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       const description = body.description !== undefined ? String(body.description).trim().substring(0, 500) : existing.description;
       const categoryId = body.categoryId !== undefined ? body.categoryId : existing.categoryId;
       const icon = body.icon !== undefined ? body.icon : existing.icon;
-      const tags = body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags;
+      const tags = body.tags !== undefined ? JSON.stringify(Array.isArray(body.tags) ? body.tags.slice(0, 10) : []) : existing.tags;
       const isPinned = body.isPinned !== undefined ? (body.isPinned ? 1 : 0) : existing.isPinned;
 
       await env.DB!.prepare(`
@@ -772,24 +832,15 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
     }
 
-    if (path.startsWith("/api/bookmarks/") && method === "DELETE") {
+    if (bmItemMatch && method === "DELETE") {
       const authErr = await requireAuth(request, env);
       if (authErr) return authErr;
 
-      const bmId = path.replace("/api/bookmarks/", "");
+      const bmId = bmItemMatch[1];
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
 
       await env.DB!.prepare("DELETE FROM bookmarks WHERE id = ?").bind(bmId).run();
       await invalidateCache(env);
-      return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
-    }
-
-    if (path.includes("/click") && method === "POST") {
-      const bmId = path.replace("/api/bookmarks/", "").replace("/click", "");
-      if (d1Bound) {
-        await env.DB!.prepare("UPDATE bookmarks SET clicks = clicks + 1 WHERE id = ?").bind(bmId).run();
-        await invalidateCache(env);
-      }
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
     }
 
@@ -800,10 +851,11 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       if (!d1Bound) return new Response(JSON.stringify({ error: "数据库未绑定" }), { status: 500, headers: corsHeaders });
       const body: any = await request.json().catch(() => ({}));
       const { orderedIds } = body;
-      if (Array.isArray(orderedIds)) {
-        for (let i = 0; i < orderedIds.length; i++) {
-          await env.DB!.prepare("UPDATE bookmarks SET sortOrder = ? WHERE id = ?").bind(i + 1, orderedIds[i]).run();
-        }
+      if (Array.isArray(orderedIds) && orderedIds.length > 0) {
+        const reorderStmts = orderedIds.map((id: string, idx: number) =>
+          env.DB!.prepare("UPDATE bookmarks SET sortOrder = ? WHERE id = ?").bind(idx + 1, id)
+        );
+        await env.DB!.batch(reorderStmts);
         await invalidateCache(env);
       }
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
@@ -920,7 +972,10 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           html += `    <DL><p>\n`;
           const catBms = bookmarks.filter((b: any) => b.categoryId === cat.id);
           for (const bm of catBms) {
-            html += `        <DT><A HREF="${escapeHtml(bm.url)}" ADD_DATE="${Math.floor(Date.now() / 1000)}" ICON="${escapeHtml(bm.icon || '')}">${escapeHtml(bm.title)}</A>\n`;
+            const addDate = bm.createdAt && !isNaN(Date.parse(bm.createdAt))
+              ? Math.floor(new Date(bm.createdAt).getTime() / 1000)
+              : Math.floor(Date.now() / 1000);
+            html += `        <DT><A HREF="${escapeHtml(bm.url)}" ADD_DATE="${addDate}" ICON="${escapeHtml(bm.icon || '')}">${escapeHtml(bm.title)}</A>\n`;
             if (bm.description) {
               html += `        <DD>${escapeHtml(bm.description)}\n`;
             }
@@ -968,15 +1023,19 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           const parsed = typeof content === "string" ? JSON.parse(content) : content;
           
           if (mode === "replace") {
-            // True replace: clear existing bookmarks and categories
-            await env.DB!.prepare("DELETE FROM bookmarks").run();
-            await env.DB!.prepare("DELETE FROM categories").run();
+            // True atomic replace: execute all deletion and insertion statements in a single atomic batch
+            const batchStmts: any[] = [
+              env.DB!.prepare("DELETE FROM bookmarks"),
+              env.DB!.prepare("DELETE FROM categories")
+            ];
 
             if (Array.isArray(parsed.categories)) {
               for (const [idx, c] of parsed.categories.entries()) {
                 const catId = c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-                await env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
-                  .bind(catId, String(c.name || "未命名分类").substring(0, 50), String(c.icon || "Folder").substring(0, 30), typeof c.sortOrder === "number" ? c.sortOrder : idx + 1, String(c.description || "").substring(0, 200)).run();
+                batchStmts.push(
+                  env.DB!.prepare("INSERT INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
+                    .bind(catId, String(c.name || "未命名分类").substring(0, 50), String(c.icon || "Folder").substring(0, 30), typeof c.sortOrder === "number" ? c.sortOrder : idx + 1, String(c.description || "").substring(0, 200))
+                );
               }
             }
 
@@ -984,20 +1043,22 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
               for (const [idx, b] of parsed.bookmarks.entries()) {
                 if (b.url && isSafeUrl(b.url)) {
                   const bmId = b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-                  await env.DB!.prepare("INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                    .bind(
-                      bmId,
-                      String(b.title || b.url).substring(0, 150),
-                      String(b.url).substring(0, 2000),
-                      String(b.description || "").substring(0, 500),
-                      b.categoryId || "cat-1",
-                      b.icon || "",
-                      JSON.stringify(Array.isArray(b.tags) ? b.tags.slice(0, 10) : []),
-                      typeof b.clicks === "number" ? b.clicks : 0,
-                      typeof b.sortOrder === "number" ? b.sortOrder : idx + 1,
-                      b.isPinned ? 1 : 0,
-                      b.createdAt || new Date().toISOString()
-                    ).run();
+                  batchStmts.push(
+                    env.DB!.prepare("INSERT INTO bookmarks (id, title, url, description, categoryId, icon, tags, clicks, sortOrder, isPinned, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                      .bind(
+                        bmId,
+                        String(b.title || b.url).substring(0, 150),
+                        String(b.url).substring(0, 2000),
+                        String(b.description || "").substring(0, 500),
+                        b.categoryId || "cat-1",
+                        b.icon || "",
+                        JSON.stringify(Array.isArray(b.tags) ? b.tags.slice(0, 10) : []),
+                        typeof b.clicks === "number" ? b.clicks : 0,
+                        typeof b.sortOrder === "number" ? b.sortOrder : idx + 1,
+                        b.isPinned ? 1 : 0,
+                        b.createdAt || new Date().toISOString()
+                      )
+                  );
                 }
               }
             }
@@ -1005,10 +1066,14 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
             if (parsed.settings && typeof parsed.settings === "object") {
               for (const [k, v] of Object.entries(parsed.settings)) {
                 if (IMPORT_SETTINGS_WHITELIST.has(k) && k !== "__proto__" && k !== "constructor") {
-                  await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, JSON.stringify(v)).run();
+                  batchStmts.push(
+                    env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, JSON.stringify(v))
+                  );
                 }
               }
             }
+
+            await env.DB!.batch(batchStmts);
           } else {
             // Merge mode: O(1) deduplication
             const existingUrls = new Set<string>();

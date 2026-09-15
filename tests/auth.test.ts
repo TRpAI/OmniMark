@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   hashPasswordPBKDF2,
   verifyPasswordPBKDF2,
-  generateSecureToken
+  generateSecureToken,
+  isSessionValid,
+  parseSessionExpiresAt
 } from "../src/utils/security.ts";
 
 test("Token generation format and entropy", () => {
@@ -17,31 +19,32 @@ test("Token generation format and entropy", () => {
   assert.equal(token1.length, 69);
 });
 
-test("Session expiration logic validation", () => {
-  const activeSessions = new Map<string, { expiresAt: number }>();
-  const tokenValid = generateSecureToken();
-  const tokenExpired = generateSecureToken();
-
+test("Session expiration logic and mixed type parsing", () => {
   const now = Date.now();
-  activeSessions.set(tokenValid, { expiresAt: now + 60000 }); // +1 min
-  activeSessions.set(tokenExpired, { expiresAt: now - 1000 }); // -1 sec
 
-  // Validate helper
-  const isSessionValid = (token: string): boolean => {
-    const session = activeSessions.get(token);
-    if (!session) return false;
-    if (session.expiresAt <= Date.now()) {
-      activeSessions.delete(token);
-      return false;
-    }
-    return true;
-  };
+  // Number timestamps
+  assert.equal(isSessionValid({ expiresAt: now + 60000 }), true);
+  assert.equal(isSessionValid({ expiresAt: now - 1000 }), false);
 
-  assert.equal(isSessionValid(tokenValid), true);
-  assert.equal(isSessionValid(tokenExpired), false);
-  // Expired session is cleaned up
-  assert.equal(activeSessions.has(tokenExpired), false);
-  assert.equal(activeSessions.has(tokenValid), true);
+  // String timestamps (ISO string or stringified ms)
+  const futureIso = new Date(now + 60000).toISOString();
+  const pastIso = new Date(now - 60000).toISOString();
+  assert.equal(isSessionValid({ expiresAt: futureIso }), true);
+  assert.equal(isSessionValid({ expiresAt: pastIso }), false);
+
+  assert.equal(isSessionValid({ expiresAt: String(now + 60000) }), true);
+  assert.equal(isSessionValid({ expiresAt: String(now - 60000) }), false);
+
+  // Invalid or missing values
+  assert.equal(isSessionValid(null), false);
+  assert.equal(isSessionValid(undefined), false);
+  assert.equal(isSessionValid({ expiresAt: "invalid-date" }), false);
+  assert.equal(isSessionValid({ expiresAt: NaN }), false);
+
+  // Helper parseSessionExpiresAt
+  assert.equal(parseSessionExpiresAt(now), now);
+  assert.equal(parseSessionExpiresAt(String(now)), now);
+  assert.ok(parseSessionExpiresAt(futureIso) > now);
 });
 
 test("Password change revokes all active sessions", async () => {

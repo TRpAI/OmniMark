@@ -553,21 +553,21 @@ export const FrontendView: React.FC<FrontendViewProps> = ({
                     </div>
 
                     {/* Render based on view mode with drag-and-drop sort support */}
-                    {renderBookmarkContainer(
-                      catBookmarks, 
-                      viewMode, 
-                      darkMode, 
-                      onBookmarkClick, 
-                      copiedId, 
-                      handleCopyUrl,
-                      handleDragEnd,
-                      sensors,
-                      handleOpenContextMenu,
-                      categoryMap,
-                      selectedTag,
-                      handleTagClick,
-                      handleCategoryClick
-                    )}
+                    <BookmarkContainer
+                      bookmarks={catBookmarks}
+                      viewMode={viewMode}
+                      darkMode={darkMode}
+                      onBookmarkClick={onBookmarkClick}
+                      copiedId={copiedId}
+                      handleCopyUrl={handleCopyUrl}
+                      onDragEnd={handleDragEnd}
+                      sensors={sensors}
+                      onContextMenu={handleOpenContextMenu}
+                      categoryMap={categoryMap}
+                      selectedTag={selectedTag}
+                      onTagClick={handleTagClick}
+                      onCategoryClick={handleCategoryClick}
+                    />
                   </div>
                 );
               })
@@ -599,21 +599,21 @@ export const FrontendView: React.FC<FrontendViewProps> = ({
                   );
                 })()}
 
-                {renderBookmarkContainer(
-                  filteredBookmarks, 
-                  viewMode, 
-                  darkMode, 
-                  onBookmarkClick, 
-                  copiedId, 
-                  handleCopyUrl,
-                  handleDragEnd,
-                  sensors,
-                  handleOpenContextMenu,
-                  categoryMap,
-                  selectedTag,
-                  handleTagClick,
-                  handleCategoryClick
-                )}
+                <BookmarkContainer
+                  bookmarks={filteredBookmarks}
+                  viewMode={viewMode}
+                  darkMode={darkMode}
+                  onBookmarkClick={onBookmarkClick}
+                  copiedId={copiedId}
+                  handleCopyUrl={handleCopyUrl}
+                  onDragEnd={handleDragEnd}
+                  sensors={sensors}
+                  onContextMenu={handleOpenContextMenu}
+                  categoryMap={categoryMap}
+                  selectedTag={selectedTag}
+                  onTagClick={handleTagClick}
+                  onCategoryClick={handleCategoryClick}
+                />
               </div>
             )}
           </div>
@@ -651,22 +651,38 @@ function safeGetHostname(urlStr: string): string {
   }
 }
 
-// Helper to render bookmarks based on viewMode with dnd-kit support and virtual scrolling windowing
-function renderBookmarkContainer(
-  bookmarks: Bookmark[],
-  viewMode: ViewMode,
-  darkMode: boolean,
-  onBookmarkClick: (id: string, url: string) => void,
-  copiedId: string | null,
-  handleCopyUrl: (e: React.MouseEvent, id: string, url: string) => void,
-  onDragEnd: (event: DragEndEvent, list: Bookmark[]) => void,
-  sensors: any,
-  onContextMenu: (e: React.MouseEvent | React.TouchEvent, bm: Bookmark, pos: { x: number; y: number }) => void,
-  categoryMap: Map<string, Category>,
-  selectedTag: string | null,
-  onTagClick: (tag: string) => void,
-  onCategoryClick: (categoryId: string) => void
-) {
+interface BookmarkContainerProps {
+  bookmarks: Bookmark[];
+  viewMode: ViewMode;
+  darkMode: boolean;
+  onBookmarkClick: (id: string, url: string) => void;
+  copiedId: string | null;
+  handleCopyUrl: (e: React.MouseEvent, id: string, url: string) => void;
+  onDragEnd: (event: DragEndEvent, list: Bookmark[]) => void;
+  sensors: any;
+  onContextMenu: (e: React.MouseEvent | React.TouchEvent, bm: Bookmark, pos: { x: number; y: number }) => void;
+  categoryMap: Map<string, Category>;
+  selectedTag: string | null;
+  onTagClick: (tag: string) => void;
+  onCategoryClick: (categoryId: string) => void;
+}
+
+// Proper React component managing its own hooks lifecycle independently per container
+const BookmarkContainer: React.FC<BookmarkContainerProps> = ({
+  bookmarks,
+  viewMode,
+  darkMode,
+  onBookmarkClick,
+  copiedId,
+  handleCopyUrl,
+  onDragEnd,
+  sensors,
+  onContextMenu,
+  categoryMap,
+  selectedTag,
+  onTagClick,
+  onCategoryClick,
+}) => {
   const [virtualLimit, setVirtualLimit] = React.useState<number>(36);
 
   const containerClass = 
@@ -735,4 +751,4 @@ function renderBookmarkContainer(
       )}
     </div>
   );
-}
+};

@@ -11,7 +11,10 @@ import {
   isSafeDomain,
   isSafeUrl,
   parseNetscapeBookmarks,
-  escapeHtml
+  escapeHtml,
+  PUBLIC_SETTINGS_KEYS,
+  isSessionValid,
+  parseSessionExpiresAt
 } from "./src/utils/security.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -164,7 +167,7 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
     return res.status(401).json({ error: "未授权：登录令牌无效或已失效，请重新登录" });
   }
 
-  if (session.expiresAt <= Date.now()) {
+  if (!isSessionValid(session)) {
     activeAdminSessions.delete(token);
     return res.status(401).json({ error: "登录会话已过期，请重新登录" });
   }
@@ -360,11 +363,27 @@ app.get("/api/icon-proxy", async (req, res) => {
   res.redirect(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(targetDomain)}&sz=128`);
 });
 
-// Public Settings (Excludes adminPasswordHash)
+// Public Settings: Whitelists public display fields for visitors, returns full safe settings for authenticated admin
 app.get("/api/settings", (req, res) => {
   const db = readDb();
-  const { adminPasswordHash, ...safeSettings } = db.settings;
-  res.json(safeSettings);
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+  const session = token ? activeAdminSessions.get(token) : null;
+  const isAdmin = isSessionValid(session);
+
+  if (isAdmin) {
+    const { adminPasswordHash, ...safeSettings } = db.settings;
+    return res.json(safeSettings);
+  }
+
+  // Public visitor: strictly whitelist public fields only
+  const publicSettings: Record<string, any> = {};
+  for (const key of PUBLIC_SETTINGS_KEYS) {
+    if (db.settings[key] !== undefined) {
+      publicSettings[key] = db.settings[key];
+    }
+  }
+  return res.json(publicSettings);
 });
 
 // Update Settings with Whitelist & Secure Password Change (Admin Only)
@@ -494,7 +513,22 @@ app.put("/api/categories/:id", requireAuth, (req, res) => {
   const idx = db.categories.findIndex((c: any) => c.id === id);
   if (idx === -1) return res.status(404).json({ error: "分类不存在" });
 
-  db.categories[idx] = { ...db.categories[idx], ...req.body };
+  const { name, icon, description, sortOrder } = req.body;
+  if (name !== undefined) {
+    const trimmedName = String(name).trim();
+    if (!trimmedName) return res.status(400).json({ error: "分类名称不能为空" });
+    db.categories[idx].name = trimmedName.substring(0, 50);
+  }
+  if (icon !== undefined) {
+    db.categories[idx].icon = String(icon).trim().substring(0, 30) || "Folder";
+  }
+  if (description !== undefined) {
+    db.categories[idx].description = String(description).trim().substring(0, 200);
+  }
+  if (sortOrder !== undefined && typeof sortOrder === "number") {
+    db.categories[idx].sortOrder = sortOrder;
+  }
+
   writeDb(db);
   res.json(db.categories[idx]);
 });
@@ -642,18 +676,55 @@ app.put("/api/bookmarks/:id", requireAuth, (req, res) => {
   const idx = db.bookmarks.findIndex((b: any) => b.id === id);
   if (idx === -1) return res.status(404).json({ error: "书签不存在" });
 
-  if (req.body.url) {
-    let normalizedUrl = req.body.url.trim();
+  const { title, url, description, categoryId, icon, tags, isPinned, sortOrder } = req.body;
+
+  if (title !== undefined) {
+    const trimmedTitle = String(title).trim();
+    if (trimmedTitle) {
+      db.bookmarks[idx].title = trimmedTitle.substring(0, 150);
+    }
+  }
+
+  if (url !== undefined) {
+    let normalizedUrl = String(url).trim();
     if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
       normalizedUrl = "https://" + normalizedUrl;
     }
     if (!isSafeUrl(normalizedUrl)) {
       return res.status(400).json({ error: "不合法的网址协议或受限的内网地址" });
     }
-    req.body.url = normalizedUrl.substring(0, 2000);
+    db.bookmarks[idx].url = normalizedUrl.substring(0, 2000);
   }
 
-  db.bookmarks[idx] = { ...db.bookmarks[idx], ...req.body };
+  if (description !== undefined) {
+    db.bookmarks[idx].description = String(description).trim().substring(0, 500);
+  }
+
+  if (categoryId !== undefined) {
+    const catExists = db.categories.some((c: any) => c.id === categoryId);
+    if (catExists) {
+      db.bookmarks[idx].categoryId = categoryId;
+    }
+  }
+
+  if (icon !== undefined) {
+    db.bookmarks[idx].icon = resolveFavicon(db.bookmarks[idx].url, String(icon));
+  }
+
+  if (tags !== undefined) {
+    db.bookmarks[idx].tags = Array.isArray(tags)
+      ? tags.map((t: any) => String(t).trim().substring(0, 25)).filter(Boolean).slice(0, 10)
+      : [];
+  }
+
+  if (isPinned !== undefined) {
+    db.bookmarks[idx].isPinned = Boolean(isPinned);
+  }
+
+  if (sortOrder !== undefined && typeof sortOrder === "number") {
+    db.bookmarks[idx].sortOrder = sortOrder;
+  }
+
   writeDb(db);
   res.json(db.bookmarks[idx]);
 });
@@ -760,7 +831,10 @@ app.get("/api/export", requireAuth, (req, res) => {
       html += `    <DL><p>\n`;
       const catBms = db.bookmarks.filter((b: any) => b.categoryId === cat.id);
       for (const bm of catBms) {
-        html += `        <DT><A HREF="${escapeHtml(bm.url)}" ADD_DATE="${Math.floor(Date.now() / 1000)}" ICON="${escapeHtml(bm.icon || '')}">${escapeHtml(bm.title)}</A>\n`;
+        const addDate = bm.createdAt && !isNaN(Date.parse(bm.createdAt))
+          ? Math.floor(new Date(bm.createdAt).getTime() / 1000)
+          : Math.floor(Date.now() / 1000);
+        html += `        <DT><A HREF="${escapeHtml(bm.url)}" ADD_DATE="${addDate}" ICON="${escapeHtml(bm.icon || '')}">${escapeHtml(bm.title)}</A>\n`;
         if (bm.description) {
           html += `        <DD>${escapeHtml(bm.description)}\n`;
         }

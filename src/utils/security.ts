@@ -296,6 +296,75 @@ export function isSafeDomain(domain: string): boolean {
   return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(lower);
 }
 
+// Dangerous non-HTTP ports to block against SSRF, port scanning, and internal service probing
+export const DANGEROUS_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 79, 87, 95,
+  101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 138, 139,
+  143, 161, 179, 389, 445, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548,
+  554, 556, 563, 587, 601, 636, 993, 995, 1433, 1521, 1723, 2049, 3306, 5432, 5900,
+  6379, 11211, 27017, 28017
+]);
+
+export function isSafePort(portVal?: string | number | null): boolean {
+  if (portVal === undefined || portVal === null || portVal === "") return true;
+  const p = typeof portVal === "number" ? portVal : parseInt(String(portVal), 10);
+  if (isNaN(p) || p <= 0 || p > 65535) return false;
+  return !DANGEROUS_PORTS.has(p);
+}
+
+// Canonical Route Regular Expressions for bookmark & category endpoints
+export const CLICK_ROUTE_REGEX = /^\/api\/bookmarks\/([a-zA-Z0-9_-]+)\/click$/;
+export const BOOKMARK_ITEM_ROUTE_REGEX = /^\/api\/bookmarks\/(?!reorder$)([a-zA-Z0-9_-]+)$/;
+export const CATEGORY_ITEM_ROUTE_REGEX = /^\/api\/categories\/(?!reorder$)([a-zA-Z0-9_-]+)$/;
+
+// Whitelist of public settings fields allowed to be returned without authentication
+export const PUBLIC_SETTINGS_KEYS = [
+  "siteName",
+  "siteSubtitle",
+  "announcement",
+  "defaultViewMode",
+  "allowPublicSubmit",
+  "enableWeather",
+  "enableSearchEngine",
+  "defaultSearchEngine"
+] as const;
+
+export const IMPORT_SETTINGS_WHITELIST = new Set([
+  "siteName",
+  "siteSubtitle",
+  "announcement",
+  "defaultViewMode",
+  "allowPublicSubmit",
+  "enableWeather",
+  "enableSearchEngine",
+  "defaultSearchEngine"
+]);
+
+/**
+ * Parses and normalizes session expiration timestamp.
+ * Safely handles numeric timestamps, numeric strings, and legacy ISO date strings.
+ */
+export function parseSessionExpiresAt(rawExpiresAt: any): number {
+  if (typeof rawExpiresAt === "number") return rawExpiresAt;
+  if (typeof rawExpiresAt === "string") {
+    const parsedIso = Date.parse(rawExpiresAt);
+    if (!isNaN(parsedIso)) return parsedIso;
+    const parsedInt = parseInt(rawExpiresAt, 10);
+    if (!isNaN(parsedInt)) return parsedInt;
+  }
+  return NaN;
+}
+
+/**
+ * Validates whether an admin session record is active and unexpired.
+ */
+export function isSessionValid(session?: { expiresAt?: any } | null, now = Date.now()): boolean {
+  if (!session || session.expiresAt === undefined || session.expiresAt === null) return false;
+  const expiresAt = parseSessionExpiresAt(session.expiresAt);
+  if (isNaN(expiresAt)) return false;
+  return expiresAt > now;
+}
+
 /**
  * Validates full URL safety (protocol, port, domain).
  */
@@ -310,12 +379,9 @@ export function isSafeUrl(urlStr: string): boolean {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 
-    // Disallow dangerous ports
-    const port = parsed.port;
-    if (port) {
-      const p = parseInt(port, 10);
-      const safePorts = [80, 443, 8080, 8443];
-      if (!safePorts.includes(p)) return false;
+    // Reject dangerous service ports (e.g., SSH, SMTP, DBs, Redis)
+    if (parsed.port) {
+      if (!isSafePort(parsed.port)) return false;
     }
 
     // Disallow userinfo (e.g., http://user:pass@host)

@@ -107,7 +107,8 @@ export default function App() {
       if (setRes.ok) {
         const setData = await setRes.json();
         setSettings(setData);
-        if (setData.defaultViewMode) {
+        // Only initialize viewMode on first load if user has no saved preference in localStorage
+        if (isInitial && !localStorage.getItem("omnimark_view_mode") && setData.defaultViewMode) {
           setViewMode(setData.defaultViewMode);
         }
       }

@@ -5,7 +5,12 @@ import {
   verifyPasswordPBKDF2,
   isSafeDomain,
   isSafeUrl,
-  parseNetscapeBookmarks
+  isSafePort,
+  parseNetscapeBookmarks,
+  PUBLIC_SETTINGS_KEYS,
+  CLICK_ROUTE_REGEX,
+  CATEGORY_ITEM_ROUTE_REGEX,
+  BOOKMARK_ITEM_ROUTE_REGEX
 } from "../src/utils/security.ts";
 
 test("PBKDF2 password hashing & verification", async () => {
@@ -118,48 +123,72 @@ test("Netscape bookmark format parser with multiline attributes", () => {
   assert.equal(parsed[2].categoryName, "AI 工具");
 });
 
-test("Import settings whitelist protection prevents credential injection", () => {
-  const allowedSettingsKeys = new Set([
-    "siteName",
-    "siteSubtitle",
-    "announcement",
-    "defaultViewMode",
-    "enableWeather",
-    "enableSearchEngine",
-    "defaultSearchEngine"
-  ]);
-
-  const maliciousPayload = {
+test("Public settings whitelist strictly hides sensitive API tokens and credentials", () => {
+  const fullSettings = {
     siteName: "Safe Custom Name",
+    siteSubtitle: "Navigation Hub",
+    announcement: "Hello world",
+    defaultViewMode: "grid",
+    allowPublicSubmit: true,
+    enableWeather: true,
+    enableSearchEngine: true,
+    defaultSearchEngine: "google",
     adminPasswordHash: "pbkdf2:sha256:100000:evil:hash",
-    geminiApiKey: "stolen-or-injected-key",
-    cfApiToken: "injected-cf-token",
-    __proto__: { polluted: true }
+    geminiApiKey: "AIzaSySecretGeminiKey123456",
+    cfApiToken: "CloudflareWorkerApiTokenSecret",
+    extraInternalField: "should-not-leak"
   };
 
-  const sanitized: Record<string, any> = {};
-  for (const [key, val] of Object.entries(maliciousPayload)) {
-    if (allowedSettingsKeys.has(key) && key !== "__proto__" && key !== "constructor") {
-      sanitized[key] = val;
+  const publicSettings: Record<string, any> = {};
+  for (const key of PUBLIC_SETTINGS_KEYS) {
+    if ((fullSettings as any)[key] !== undefined) {
+      publicSettings[key] = (fullSettings as any)[key];
     }
   }
 
-  assert.equal(sanitized.siteName, "Safe Custom Name");
-  assert.equal(sanitized.adminPasswordHash, undefined);
-  assert.equal(sanitized.geminiApiKey, undefined);
-  assert.equal(sanitized.cfApiToken, undefined);
-  assert.equal((Object.prototype as any).polluted, undefined);
+  assert.equal(publicSettings.siteName, "Safe Custom Name");
+  assert.equal(publicSettings.adminPasswordHash, undefined);
+  assert.equal(publicSettings.geminiApiKey, undefined);
+  assert.equal(publicSettings.cfApiToken, undefined);
+  assert.equal(publicSettings.extraInternalField, undefined);
+  assert.deepEqual(Object.keys(publicSettings).sort(), [...PUBLIC_SETTINGS_KEYS].sort());
 });
 
-test("Strict click route matching avoids broad substring false positives", () => {
-  const clickRouteRegex = /^\/api\/bookmarks\/([^\/]+)\/click$/;
+test("Canonical route regexes prevent path traversal and false positives", () => {
+  // 1. CLICK_ROUTE_REGEX
+  assert.match("/api/bookmarks/bm-123/click", CLICK_ROUTE_REGEX);
+  assert.equal("/api/bookmarks/bm-123/click".match(CLICK_ROUTE_REGEX)?.[1], "bm-123");
 
-  assert.match("/api/bookmarks/bm-123/click", clickRouteRegex);
-  assert.equal(clickRouteRegex.exec("/api/bookmarks/bm-123/click")?.[1], "bm-123");
+  assert.equal(CLICK_ROUTE_REGEX.test("/api/bookmarks/bm-123/click-tracker"), false);
+  assert.equal(CLICK_ROUTE_REGEX.test("/api/bookmarks/click/details"), false);
+  assert.equal(CLICK_ROUTE_REGEX.test("/api/bookmarks/click"), false);
+  assert.equal(CLICK_ROUTE_REGEX.test("/api/bookmarks/bm-1/click/sub"), false);
 
-  // False positives that path.includes("/click") would mistakenly match
-  assert.equal(clickRouteRegex.test("/api/bookmarks/bm-123/click-tracker"), false);
-  assert.equal(clickRouteRegex.test("/api/bookmarks/click/details"), false);
-  assert.equal(clickRouteRegex.test("/api/bookmarks/click"), false);
-  assert.equal(clickRouteRegex.test("/api/bookmarks/bm-1/click/sub"), false);
+  // 2. CATEGORY_ITEM_ROUTE_REGEX
+  assert.match("/api/categories/cat-1", CATEGORY_ITEM_ROUTE_REGEX);
+  assert.equal("/api/categories/cat-1".match(CATEGORY_ITEM_ROUTE_REGEX)?.[1], "cat-1");
+  assert.equal(CATEGORY_ITEM_ROUTE_REGEX.test("/api/categories/reorder"), false);
+  assert.equal(CATEGORY_ITEM_ROUTE_REGEX.test("/api/categories/cat-1/sub"), false);
+
+  // 3. BOOKMARK_ITEM_ROUTE_REGEX
+  assert.match("/api/bookmarks/bm-1", BOOKMARK_ITEM_ROUTE_REGEX);
+  assert.equal("/api/bookmarks/bm-1".match(BOOKMARK_ITEM_ROUTE_REGEX)?.[1], "bm-1");
+  assert.equal(BOOKMARK_ITEM_ROUTE_REGEX.test("/api/bookmarks/reorder"), false);
+  assert.equal(BOOKMARK_ITEM_ROUTE_REGEX.test("/api/bookmarks/bm-1/click"), false);
+  assert.equal(BOOKMARK_ITEM_ROUTE_REGEX.test("/api/bookmarks/bm-1/sub"), false);
+});
+
+test("Port safety validation against internal service ports", () => {
+  // Standard web ports
+  assert.equal(isSafePort(80), true);
+  assert.equal(isSafePort(443), true);
+  assert.equal(isSafePort(8080), true);
+
+  // Blocked dangerous ports
+  assert.equal(isSafePort(22), false); // SSH
+  assert.equal(isSafePort(25), false); // SMTP
+  assert.equal(isSafePort(6379), false); // Redis
+  assert.equal(isSafePort(27017), false); // MongoDB
+  assert.equal(isSafePort(3306), false); // MySQL
+  assert.equal(isSafePort(5432), false); // Postgres
 });
