@@ -61,9 +61,31 @@ export default {
   },
 };
 
+// Robust validation to ensure D1 and KV are real bindings and not RPC stubs or ASSETS fetchers
+function isRealD1(val: any): boolean {
+  if (!val || typeof val !== "object") return false;
+  if (typeof val.fetch === "function") return false;
+  if (typeof val.prepare !== "function" || typeof val.batch !== "function") return false;
+  try {
+    const stmt = val.prepare("SELECT 1");
+    if (!stmt || typeof stmt.then === "function") return false;
+    return typeof stmt.bind === "function" && typeof stmt.all === "function";
+  } catch {
+    return false;
+  }
+}
+
+function isRealKV(val: any): boolean {
+  if (!val || typeof val !== "object") return false;
+  if (typeof val.fetch === "function") return false;
+  if (typeof val.get !== "function" || typeof val.put !== "function") return false;
+  return typeof val.getWithMetadata === "function" || typeof val.delete === "function";
+}
+
 // Initial database schema bootstrap for Cloudflare D1
 async function ensureTables(db: D1Database) {
   try {
+    if (!isRealD1(db)) return;
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -117,23 +139,24 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
     return new Response(null, { headers: corsHeaders });
   }
 
-  // 深度智能扫描 env 对象：即使绑定的变量名大小写不一致或用了自定义名称，也能自动识别
-  let activeD1 = env?.DB || env?.db || env?.D1 || env?.DATABASE;
-  let activeKV = env?.CACHE_KV || env?.KV || env?.cache_kv || env?.kv;
+  // 深度智能扫描 env 对象：严格鉴别真实 D1 数据库与 KV，排除 ASSETS RPC 代理和 Service Stubs
+  let activeD1 = isRealD1(env?.DB) ? env.DB : (isRealD1(env?.db) ? env.db : (isRealD1(env?.D1) ? env.D1 : (isRealD1(env?.DATABASE) ? env.DATABASE : null)));
+  let activeKV = isRealKV(env?.CACHE_KV) ? env.CACHE_KV : (isRealKV(env?.KV) ? env.KV : (isRealKV(env?.cache_kv) ? env.cache_kv : (isRealKV(env?.kv) ? env.kv : null)));
 
   if (env && typeof env === "object") {
     for (const [key, val] of Object.entries(env)) {
-      if (!activeD1 && val && typeof (val as any).prepare === "function") {
-        activeD1 = val as any;
+      if (key === "ASSETS" || key === "CF_PAGES" || key === "__STATIC_CONTENT") continue;
+      if (!activeD1 && isRealD1(val)) {
+        activeD1 = val;
       }
-      if (!activeKV && val && typeof (val as any).get === "function" && typeof (val as any).put === "function") {
-        activeKV = val as any;
+      if (!activeKV && isRealKV(val)) {
+        activeKV = val;
       }
     }
   }
 
-  const d1Bound = Boolean(activeD1 && typeof activeD1.prepare === "function");
-  const kvBound = Boolean(activeKV && typeof activeKV.get === "function");
+  const d1Bound = Boolean(activeD1);
+  const kvBound = Boolean(activeKV);
 
   // Normalize to env.DB and env.CACHE_KV so all downstream operations work transparently
   if (d1Bound) {
