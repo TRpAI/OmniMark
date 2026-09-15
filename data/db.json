@@ -1,6 +1,6 @@
 {
   "settings": {
-    "siteName": "OmniMark 导航与书签",
+    "siteName": "OmniMark 站点导航与书签系统",
     "siteSubtitle": "极简、高效、多端同步的现代化站点导航与书签管理系统",
     "adminPasswordHash": "admin123",
     "defaultViewMode": "grid",

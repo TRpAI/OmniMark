@@ -16,7 +16,7 @@ export default function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [settings, setSettings] = useState<SiteSettings>({
-    siteName: "OmniMark 导航与书签",
+    siteName: "OmniMark 站点导航与书签系统",
     siteSubtitle: "现代化极简站点导航与书签管理系统",
     adminPasswordHash: "admin123",
     defaultViewMode: "grid",
@@ -134,6 +134,13 @@ export default function App() {
 
     return () => clearInterval(pollInterval);
   }, []);
+
+  // Sync document title with site settings
+  useEffect(() => {
+    if (settings.siteName) {
+      document.title = settings.siteName;
+    }
+  }, [settings.siteName]);
 
   // Apply dark mode class to html root
   useEffect(() => {

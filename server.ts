@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 
@@ -10,18 +11,17 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-// Security Middleware: Set fundamental HTTP protection headers
+// Security Middleware: Set fundamental HTTP protection headers (Removed obsolete X-XSS-Protection)
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
-  res.setHeader("X-XSS-Protection", "1; mode=block");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   next();
 });
 
-// JSON Body Parser with safe payload limit
-app.use(express.json({ limit: "25mb" }));
-app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+// JSON Body Parser with strict safe payload limit (10mb)
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // Persistent storage paths
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -35,12 +35,17 @@ if (!fs.existsSync(FAVICONS_DIR)) {
   fs.mkdirSync(FAVICONS_DIR, { recursive: true });
 }
 
-// Initial default database structure
+// Helper: Hash password with SHA-256
+function hashPassword(password: string): string {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+// Initial default database structure with hashed default password (admin123)
 const defaultData = {
   settings: {
-    siteName: "OmniMark 导航与书签",
+    siteName: "OmniMark 站点导航与书签系统",
     siteSubtitle: "极简、高效、多端同步的现代化站点导航与书签管理系统",
-    adminPasswordHash: "admin123",
+    adminPasswordHash: hashPassword("admin123"),
     defaultViewMode: "grid",
     allowPublicSubmit: false,
     enableWeather: true,
@@ -94,37 +99,11 @@ const defaultData = {
       sortOrder: 3,
       isPinned: true,
       createdAt: new Date().toISOString()
-    },
-    {
-      id: "bm-4",
-      title: "Tailwind CSS",
-      url: "https://tailwindcss.com",
-      description: "现代功能类优先 CSS 框架，构建快速响应式界面",
-      categoryId: "cat-2",
-      icon: "https://tailwindcss.com/favicons/favicon.ico?v=3",
-      tags: ["前端", "CSS", "设计"],
-      clicks: 65,
-      sortOrder: 4,
-      isPinned: false,
-      createdAt: new Date().toISOString()
-    },
-    {
-      id: "bm-5",
-      title: "Dribbble",
-      url: "https://dribbble.com",
-      description: "全球顶尖设计师展示与灵感搜寻创意社区",
-      categoryId: "cat-4",
-      icon: "https://cdn.dribbble.com/assets/favicon-bde37f6a6132e65cad4c52d00164c06cfb5e695ec2d23348d6babf7a7d4aef83.ico",
-      tags: ["设计", "UI", "灵感"],
-      clicks: 44,
-      sortOrder: 5,
-      isPinned: false,
-      createdAt: new Date().toISOString()
     }
   ]
 };
 
-// High-Performance In-Memory Cache with Atomic File Persistence
+// In-Memory Database Cache with Atomic File Persistence
 let cachedDb: any = null;
 
 function readDb() {
@@ -153,75 +132,129 @@ function writeDb(data: any) {
     fs.renameSync(tempFile, DB_FILE);
   } catch (err) {
     console.error("Error writing database file:", err);
+    throw new Error("数据库持久化保存失败");
   }
 }
 
-// Authentication middleware
+// Active Secure Admin Tokens Store
+const activeAdminTokens = new Set<string>();
+
+// Authentication middleware with robust token validation & query protection
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  const queryToken = req.query.token as string;
-  const effectiveToken = token || queryToken;
+  const queryTokenRaw = req.query.token;
+  const queryToken = Array.isArray(queryTokenRaw) ? queryTokenRaw[0] : queryTokenRaw;
+  const effectiveToken = token || (typeof queryToken === "string" ? queryToken : null);
 
-  if (!effectiveToken || !effectiveToken.startsWith("omni-admin-token-")) {
+  if (!effectiveToken || !activeAdminTokens.has(effectiveToken)) {
     return res.status(401).json({ error: "未授权：请先登录管理员账户以执行该操作" });
   }
   next();
 }
 
-// Brute-force rate limiter for admin login
+// Brute-force rate limiter for admin login (Only counts failed attempts, with memory leak cleanup)
 interface RateLimitRecord {
-  count: number;
+  failCount: number;
   firstAttempt: number;
 }
 const loginRateLimitMap = new Map<string, RateLimitRecord>();
 
 function checkLoginRateLimit(ip: string): boolean {
   const now = Date.now();
+  // Cleanup expired entries older than 2 minutes
+  for (const [key, rec] of loginRateLimitMap.entries()) {
+    if (now - rec.firstAttempt > 120000) {
+      loginRateLimitMap.delete(key);
+    }
+  }
+
   const record = loginRateLimitMap.get(ip);
-  if (!record) {
-    loginRateLimitMap.set(ip, { count: 1, firstAttempt: now });
-    return true;
-  }
+  if (!record) return true;
 
-  // 60-second window
   if (now - record.firstAttempt > 60000) {
-    loginRateLimitMap.set(ip, { count: 1, firstAttempt: now });
+    loginRateLimitMap.delete(ip);
     return true;
   }
 
-  if (record.count >= 5) {
-    return false; // Rate limit exceeded (more than 5 failed attempts in 1 min)
-  }
-
-  record.count += 1;
-  return true;
+  return record.failCount < 5;
 }
 
-// SSRF Safe Domain Validator
+function recordLoginFailure(ip: string) {
+  const now = Date.now();
+  const record = loginRateLimitMap.get(ip);
+  if (!record) {
+    loginRateLimitMap.set(ip, { failCount: 1, firstAttempt: now });
+  } else {
+    if (now - record.firstAttempt > 60000) {
+      loginRateLimitMap.set(ip, { failCount: 1, firstAttempt: now });
+    } else {
+      record.failCount += 1;
+    }
+  }
+}
+
+function clearLoginFailures(ip: string) {
+  loginRateLimitMap.delete(ip);
+}
+
+// Robust SSRF Safe Domain Validator
 function isSafeDomain(domain: string): boolean {
   if (!domain || typeof domain !== "string" || domain.length > 253) return false;
-  const lower = domain.toLowerCase();
-  
-  // Disallow localhost, loopback, private IP ranges and special TLDs
+  const lower = domain.toLowerCase().trim();
+
+  // Forbidden local / loopback / metadata / private hosts
   const forbiddenHosts = [
-    "localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "::1", "metadata.google.internal"
+    "localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "::1",
+    "metadata.google.internal", "instance-data", "kubernetes.default"
   ];
   if (forbiddenHosts.includes(lower)) return false;
 
-  // Disallow private IP patterns
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/.test(lower)) return false;
-  if (lower.endsWith(".local") || lower.endsWith(".internal") || lower.endsWith(".arpa") || lower.endsWith(".lan")) return false;
+  // Private IPv4 ranges, CGNAT (100.64.0.0/10), link-local
+  if (
+    /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.)/.test(lower)
+  ) {
+    return false;
+  }
 
-  // Alphanumeric + dot + dash check
-  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(domain);
+  // Private TLDs
+  if (lower.endsWith(".local") || lower.endsWith(".internal") || lower.endsWith(".arpa") || lower.endsWith(".lan") || lower.endsWith(".localhost")) {
+    return false;
+  }
+
+  // Check IPv6 loopback or private ranges
+  if (lower.startsWith("[") && lower.endsWith("]")) {
+    const unbracketed = lower.slice(1, -1);
+    if (unbracketed === "::1" || unbracketed.startsWith("fc") || unbracketed.startsWith("fd") || unbracketed.startsWith("fe80")) {
+      return false;
+    }
+  }
+
+  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(lower);
 }
 
 // URL Protocol Validator
 function isSafeUrl(urlStr: string): boolean {
   if (!urlStr || typeof urlStr !== "string") return false;
   const trimmed = urlStr.trim().toLowerCase();
-  return trimmed.startsWith("http://") || trimmed.startsWith("https://");
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return isSafeDomain(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+// HTML Escape helper to prevent XSS
+function escapeHtml(str: string): string {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 // ==========================================
@@ -230,7 +263,6 @@ function isSafeUrl(urlStr: string): boolean {
 
 // Health Check & Cloudflare System Status
 app.get("/api/health", (req, res) => {
-  const db = readDb();
   const d1Bound = Boolean(process.env.CF_D1_DATABASE_ID || process.env.DB_BINDING);
   const kvBound = Boolean(process.env.CF_KV_NAMESPACE_ID || process.env.KV_BINDING);
   const warnings: string[] = [];
@@ -313,7 +345,7 @@ app.get("/api/system/status", (req, res) => {
   });
 });
 
-// Favicon Local Caching Proxy (抓取并本地缓存图标，防 SSRF 注入)
+// Favicon Local Caching Proxy with strict SSRF & Size Limits
 app.get("/api/icon-proxy", async (req, res) => {
   const { url, domain } = req.query;
   let targetDomain = domain as string;
@@ -333,64 +365,82 @@ app.get("/api/icon-proxy", async (req, res) => {
   const safeFileName = targetDomain.replace(/[^a-zA-Z0-9.-]/g, "_") + ".png";
   const cachedFilePath = path.join(FAVICONS_DIR, safeFileName);
 
-  // Return from local cache if file exists (Ultra-fast disk stream)
   if (fs.existsSync(cachedFilePath)) {
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=604800, immutable");
     return fs.createReadStream(cachedFilePath).pipe(res);
   }
 
-  // Fetch from Google Favicon service with 3s timeout to protect node server
   try {
     const googleFaviconUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(targetDomain)}&sz=128`;
     const fetchRes = await fetch(googleFaviconUrl, { signal: AbortSignal.timeout(3000) });
     if (fetchRes.ok) {
       const buffer = Buffer.from(await fetchRes.arrayBuffer());
-      // Only cache if valid image buffer (> 100 bytes)
-      if (buffer.length > 100) {
+      if (buffer.length > 50 && buffer.length < 500 * 1024) {
+        // Enforce cache file count limit: if > 1000 files, remove oldest
+        try {
+          const files = fs.readdirSync(FAVICONS_DIR);
+          if (files.length > 1000) {
+            const oldest = files
+              .map(f => ({ name: f, time: fs.statSync(path.join(FAVICONS_DIR, f)).mtimeMs }))
+              .sort((a, b) => a.time - b.time)[0];
+            if (oldest) fs.unlinkSync(path.join(FAVICONS_DIR, oldest.name));
+          }
+        } catch {}
+
         fs.writeFileSync(cachedFilePath, buffer);
       }
       res.setHeader("Content-Type", "image/png");
       res.setHeader("Cache-Control", "public, max-age=604800, immutable");
       return res.send(buffer);
     }
-  } catch (e) {
-    // Timeout or network fallback
-  }
+  } catch (e) {}
 
   res.redirect(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(targetDomain)}&sz=128`);
 });
 
-// Public Settings
+// Public Settings (Excludes adminPasswordHash)
 app.get("/api/settings", (req, res) => {
   const db = readDb();
   const { adminPasswordHash, ...safeSettings } = db.settings;
   res.json(safeSettings);
 });
 
-// Update Settings (Admin Only)
+// Update Settings with Whitelist & Secure Password Change (Admin Only)
 app.put("/api/settings", requireAuth, (req, res) => {
   const db = readDb();
   const { currentPassword, newPassword, ...rest } = req.body;
 
   if (newPassword) {
-    if (currentPassword !== db.settings.adminPasswordHash) {
+    if (!currentPassword || hashPassword(currentPassword) !== db.settings.adminPasswordHash) {
       return res.status(401).json({ error: "当前管理员密码不正确" });
     }
     if (typeof newPassword !== "string" || newPassword.length < 6) {
       return res.status(400).json({ error: "新密码长度不能少于 6 位" });
     }
-    db.settings.adminPasswordHash = newPassword;
+    db.settings.adminPasswordHash = hashPassword(newPassword);
   }
 
-  db.settings = { ...db.settings, ...rest };
+  // Strict whitelist for settings updates to prevent arbitrary prototype or secret pollution
+  const allowedKeys = [
+    "siteName", "siteSubtitle", "announcement", "defaultViewMode",
+    "allowPublicSubmit", "enableWeather", "enableSearchEngine", "defaultSearchEngine",
+    "geminiApiKey", "cfApiToken", "cfAccountId", "cfD1DatabaseId", "cfKvNamespaceId"
+  ];
+
+  for (const key of allowedKeys) {
+    if (rest[key] !== undefined) {
+      db.settings[key] = rest[key];
+    }
+  }
+
   writeDb(db);
 
   const { adminPasswordHash, ...safeSettings } = db.settings;
   res.json({ success: true, settings: safeSettings });
 });
 
-// Admin Login (Rate-limited & Protected)
+// Admin Login (Secure Rate-limited & Cryptographic Token)
 app.post("/api/auth/login", (req, res) => {
   const clientIp = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "unknown").split(",")[0].trim();
 
@@ -404,30 +454,28 @@ app.post("/api/auth/login", (req, res) => {
   const { password } = req.body;
   const db = readDb();
 
-  if (password && password === db.settings.adminPasswordHash) {
-    // Reset rate limiter on successful login
-    loginRateLimitMap.delete(clientIp);
-    res.json({ 
-      success: true, 
-      token: "omni-admin-token-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8) 
-    });
-  } else {
-    res.status(401).json({ success: false, error: "管理员密码错误" });
+  const hashedInput = hashPassword(password || "");
+  if (hashedInput === db.settings.adminPasswordHash) {
+    clearLoginFailures(clientIp);
+    const token = "omni-admin-token-" + crypto.randomBytes(24).toString("hex");
+    activeAdminTokens.add(token);
+    return res.json({ success: true, token });
   }
+
+  recordLoginFailure(clientIp);
+  return res.status(401).json({ success: false, error: "管理员密码错误，请重新输入" });
 });
 
 // ==========================================
 // Category Endpoints
 // ==========================================
 
-// Get All Categories
 app.get("/api/categories", (req, res) => {
   const db = readDb();
   const sorted = [...db.categories].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
   res.json(sorted);
 });
 
-// Create Category (Admin Only)
 app.post("/api/categories", requireAuth, (req, res) => {
   const db = readDb();
   const { name, icon, description } = req.body;
@@ -435,15 +483,13 @@ app.post("/api/categories", requireAuth, (req, res) => {
     return res.status(400).json({ error: "分类名称不能为空" });
   }
 
-  const safeName = String(name).trim().substring(0, 50);
-  const safeDesc = description ? String(description).trim().substring(0, 200) : "";
-
+  const maxSort = db.categories.reduce((max: number, c: any) => Math.max(max, c.sortOrder || 0), 0);
   const newCat = {
     id: "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
-    name: safeName,
-    icon: icon || "Folder",
-    sortOrder: db.categories.length + 1,
-    description: safeDesc
+    name: String(name).trim().substring(0, 50),
+    icon: icon ? String(icon).trim().substring(0, 30) : "Folder",
+    sortOrder: maxSort + 1,
+    description: description ? String(description).trim().substring(0, 200) : ""
   };
 
   db.categories.push(newCat);
@@ -451,32 +497,29 @@ app.post("/api/categories", requireAuth, (req, res) => {
   res.json(newCat);
 });
 
-// Update Category (Admin Only)
 app.put("/api/categories/:id", requireAuth, (req, res) => {
   const { id } = req.params;
   const db = readDb();
   const idx = db.categories.findIndex((c: any) => c.id === id);
   if (idx === -1) return res.status(404).json({ error: "分类不存在" });
 
-  const safeBody = { ...req.body };
-  if (safeBody.name) safeBody.name = String(safeBody.name).trim().substring(0, 50);
-  if (safeBody.description) safeBody.description = String(safeBody.description).trim().substring(0, 200);
-
-  db.categories[idx] = { ...db.categories[idx], ...safeBody };
+  db.categories[idx] = { ...db.categories[idx], ...req.body };
   writeDb(db);
   res.json(db.categories[idx]);
 });
 
-// Delete Category (Admin Only)
 app.delete("/api/categories/:id", requireAuth, (req, res) => {
   const { id } = req.params;
   const db = readDb();
+  if (db.categories.length <= 1) {
+    return res.status(400).json({ error: "至少需要保留一个分类" });
+  }
+
   db.categories = db.categories.filter((c: any) => c.id !== id);
-  
-  const fallbackCatId = db.categories[0]?.id || "cat-default";
-  db.bookmarks.forEach((bm: any) => {
-    if (bm.categoryId === id) {
-      bm.categoryId = fallbackCatId;
+  const fallbackCatId = db.categories[0].id;
+  db.bookmarks.forEach((b: any) => {
+    if (b.categoryId === id) {
+      b.categoryId = fallbackCatId;
     }
   });
 
@@ -484,10 +527,9 @@ app.delete("/api/categories/:id", requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// Reorder Categories (Admin Only)
 app.post("/api/categories/reorder", requireAuth, (req, res) => {
   const { orderedIds } = req.body;
-  if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "参数错误：orderedIds 必须为数组" });
+  if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "参数错误" });
 
   const db = readDb();
   orderedIds.forEach((id: string, idx: number) => {
@@ -503,7 +545,6 @@ app.post("/api/categories/reorder", requireAuth, (req, res) => {
 // Bookmark Endpoints
 // ==========================================
 
-// Get Bookmarks
 app.get("/api/bookmarks", (req, res) => {
   const db = readDb();
   const { categoryId, search, tag } = req.query;
@@ -527,11 +568,17 @@ app.get("/api/bookmarks", (req, res) => {
     list = list.filter((b: any) => b.tags && b.tags.includes(tq));
   }
 
-  list.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+  // Sort by pinned status first (pinned items on top), then sortOrder
+  list.sort((a, b) => {
+    if (Boolean(b.isPinned) !== Boolean(a.isPinned)) {
+      return Boolean(b.isPinned) ? 1 : -1;
+    }
+    return (a.sortOrder || 0) - (b.sortOrder || 0);
+  });
+
   res.json(list);
 });
 
-// Helper for favicon resolution with SSRF checks
 function resolveFavicon(url: string, icon?: string): string {
   if (icon && icon.trim() && isSafeUrl(icon)) return icon.trim();
   try {
@@ -543,8 +590,14 @@ function resolveFavicon(url: string, icon?: string): string {
   return "/api/icon-proxy?domain=example.com";
 }
 
-// Add Bookmark
-app.post("/api/bookmarks", (req, res) => {
+// Add Bookmark (Checks allowPublicSubmit setting)
+app.post("/api/bookmarks", (req, res, next) => {
+  const db = readDb();
+  if (!db.settings.allowPublicSubmit) {
+    return requireAuth(req, res, next);
+  }
+  next();
+}, (req, res) => {
   const db = readDb();
   const { title, url, description, categoryId, icon, tags, isPinned } = req.body;
 
@@ -556,7 +609,7 @@ app.post("/api/bookmarks", (req, res) => {
   }
 
   if (!isSafeUrl(normalizedUrl)) {
-    return res.status(400).json({ error: "不合法的网址协议，仅支持 http:// 或 https://" });
+    return res.status(400).json({ error: "不合法的网址协议或受限的内网地址" });
   }
 
   let finalTitle = title && title.trim() ? title.trim().substring(0, 150) : "";
@@ -569,6 +622,7 @@ app.post("/api/bookmarks", (req, res) => {
   }
 
   const finalIcon = resolveFavicon(normalizedUrl, icon);
+  const maxSort = db.bookmarks.reduce((max: number, b: any) => Math.max(max, b.sortOrder || 0), 0);
 
   const newBm = {
     id: "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
@@ -581,7 +635,7 @@ app.post("/api/bookmarks", (req, res) => {
       ? tags.map(t => String(t).trim().substring(0, 25)).filter(Boolean).slice(0, 10) 
       : [],
     clicks: 0,
-    sortOrder: db.bookmarks.length + 1,
+    sortOrder: maxSort + 1,
     isPinned: !!isPinned,
     createdAt: new Date().toISOString()
   };
@@ -591,7 +645,6 @@ app.post("/api/bookmarks", (req, res) => {
   res.json(newBm);
 });
 
-// Update Bookmark (Admin Only)
 app.put("/api/bookmarks/:id", requireAuth, (req, res) => {
   const { id } = req.params;
   const db = readDb();
@@ -604,7 +657,7 @@ app.put("/api/bookmarks/:id", requireAuth, (req, res) => {
       normalizedUrl = "https://" + normalizedUrl;
     }
     if (!isSafeUrl(normalizedUrl)) {
-      return res.status(400).json({ error: "不合法的网址协议" });
+      return res.status(400).json({ error: "不合法的网址协议或受限的内网地址" });
     }
     req.body.url = normalizedUrl.substring(0, 2000);
   }
@@ -614,7 +667,6 @@ app.put("/api/bookmarks/:id", requireAuth, (req, res) => {
   res.json(db.bookmarks[idx]);
 });
 
-// Delete Bookmark (Admin Only)
 app.delete("/api/bookmarks/:id", requireAuth, (req, res) => {
   const { id } = req.params;
   const db = readDb();
@@ -623,7 +675,6 @@ app.delete("/api/bookmarks/:id", requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// Increment Bookmark Clicks
 app.post("/api/bookmarks/:id/click", (req, res) => {
   const { id } = req.params;
   const db = readDb();
@@ -637,10 +688,9 @@ app.post("/api/bookmarks/:id/click", (req, res) => {
   }
 });
 
-// Reorder Bookmarks (Admin Only)
 app.post("/api/bookmarks/reorder", requireAuth, (req, res) => {
   const { orderedIds } = req.body;
-  if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "参数错误：orderedIds 必须为数组" });
+  if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "参数错误" });
 
   const db = readDb();
   orderedIds.forEach((id: string, idx: number) => {
@@ -652,12 +702,11 @@ app.post("/api/bookmarks/reorder", requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// Browser Extension & Bookmarklet Capture Endpoint
 app.post("/api/plugin/capture", (req, res) => {
+  const db = readDb();
   const { url, title, description, categoryId, tags } = req.body;
   if (!url) return res.status(400).json({ error: "URL 不能为空" });
 
-  const db = readDb();
   let normalizedUrl = url.trim();
   if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
     normalizedUrl = "https://" + normalizedUrl;
@@ -677,6 +726,7 @@ app.post("/api/plugin/capture", (req, res) => {
   }
 
   const icon = resolveFavicon(normalizedUrl);
+  const maxSort = db.bookmarks.reduce((max: number, b: any) => Math.max(max, b.sortOrder || 0), 0);
 
   const newBm = {
     id: "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
@@ -689,7 +739,7 @@ app.post("/api/plugin/capture", (req, res) => {
       ? tags.map(t => String(t).trim().substring(0, 25)).slice(0, 10) 
       : ["插件采集"],
     clicks: 0,
-    sortOrder: db.bookmarks.length + 1,
+    sortOrder: maxSort + 1,
     isPinned: false,
     createdAt: new Date().toISOString()
   };
@@ -700,11 +750,10 @@ app.post("/api/plugin/capture", (req, res) => {
 });
 
 // ==========================================
-// Export & Import Endpoints
+// Export & Import Endpoints (Protected & Sanitized)
 // ==========================================
 
-// Export Bookmarks
-app.get("/api/export", (req, res) => {
+app.get("/api/export", requireAuth, (req, res) => {
   const { format = "json" } = req.query;
   const db = readDb();
 
@@ -716,13 +765,13 @@ app.get("/api/export", (req, res) => {
     html += `<DL><p>\n`;
 
     for (const cat of db.categories) {
-      html += `    <DT><H3 ADD_DATE="${Math.floor(Date.now() / 1000)}">${cat.name}</H3>\n`;
+      html += `    <DT><H3 ADD_DATE="${Math.floor(Date.now() / 1000)}">${escapeHtml(cat.name)}</H3>\n`;
       html += `    <DL><p>\n`;
       const catBms = db.bookmarks.filter((b: any) => b.categoryId === cat.id);
       for (const bm of catBms) {
-        html += `        <DT><A HREF="${bm.url}" ADD_DATE="${Math.floor(Date.now() / 1000)}" ICON="${bm.icon || ''}">${bm.title}</A>\n`;
+        html += `        <DT><A HREF="${escapeHtml(bm.url)}" ADD_DATE="${Math.floor(Date.now() / 1000)}" ICON="${escapeHtml(bm.icon || '')}">${escapeHtml(bm.title)}</A>\n`;
         if (bm.description) {
-          html += `        <DD>${bm.description}\n`;
+          html += `        <DD>${escapeHtml(bm.description)}\n`;
         }
       }
       html += `    </DL><p>\n`;
@@ -733,13 +782,18 @@ app.get("/api/export", (req, res) => {
     res.setHeader("Content-Disposition", 'attachment; filename="bookmarks_export.html"');
     return res.send(html);
   } else {
+    // Strip sensitive admin password hash before exporting JSON
+    const { adminPasswordHash, geminiApiKey, cfApiToken, ...safeSettings } = db.settings;
+    const sanitizedDb = {
+      ...db,
+      settings: safeSettings
+    };
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="omnimark_backup.json"');
-    return res.send(JSON.stringify(db, null, 2));
+    return res.send(JSON.stringify(sanitizedDb, null, 2));
   }
 });
 
-// Import Bookmarks (HTML / JSON)
 app.post("/api/import", requireAuth, (req, res) => {
   const { type, content, mode = "merge" } = req.body;
   const db = readDb();
@@ -749,35 +803,41 @@ app.post("/api/import", requireAuth, (req, res) => {
       const parsed = typeof content === "string" ? JSON.parse(content) : content;
       if (mode === "replace") {
         if (parsed.categories && Array.isArray(parsed.categories)) db.categories = parsed.categories;
-        if (parsed.bookmarks && Array.isArray(parsed.bookmarks)) db.bookmarks = parsed.bookmarks;
-        if (parsed.settings) db.settings = { ...db.settings, ...parsed.settings };
+        if (parsed.bookmarks && Array.isArray(parsed.bookmarks)) {
+          db.bookmarks = parsed.bookmarks.filter((b: any) => b.url && isSafeUrl(b.url));
+        }
+        if (parsed.settings) {
+          const { adminPasswordHash, ...safeImportedSettings } = parsed.settings;
+          db.settings = { ...db.settings, ...safeImportedSettings };
+        }
       } else {
-        // Merge mode
         if (Array.isArray(parsed.categories)) {
           for (const c of parsed.categories) {
             if (!db.categories.some((item: any) => item.id === c.id || item.name === c.name)) {
+              const maxSort = db.categories.reduce((m: number, item: any) => Math.max(m, item.sortOrder || 0), 0);
               db.categories.push({
                 ...c,
                 id: c.id || "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 5),
-                sortOrder: db.categories.length + 1
+                sortOrder: maxSort + 1
               });
             }
           }
         }
         if (Array.isArray(parsed.bookmarks)) {
           for (const b of parsed.bookmarks) {
-            if (isSafeUrl(b.url) && !db.bookmarks.some((item: any) => item.url === b.url)) {
+            if (b.url && isSafeUrl(b.url) && !db.bookmarks.some((item: any) => item.url === b.url)) {
+              const maxSort = db.bookmarks.reduce((m: number, item: any) => Math.max(m, item.sortOrder || 0), 0);
               db.bookmarks.push({
                 ...b,
                 id: b.id || "bm-" + Date.now() + "-" + Math.random().toString(36).substring(2, 5),
-                sortOrder: db.bookmarks.length + 1
+                sortOrder: maxSort + 1
               });
             }
           }
         }
       }
       writeDb(db);
-      return res.json({ success: true, message: "JSON 备份数据已成功导入并合并" });
+      return res.json({ success: true, message: "JSON 备份数据已成功导入并安全校验" });
     } else if (type === "html") {
       let importedCount = 0;
       let currentFolder = "浏览器导入";
@@ -786,7 +846,7 @@ app.post("/api/import", requireAuth, (req, res) => {
       for (const line of lines) {
         const folderMatch = /<H3[^>]*>(.*?)<\/H3>/i.exec(line);
         if (folderMatch && folderMatch[1]) {
-          const folderName = folderMatch[1].trim();
+          const folderName = folderMatch[1].replace(/<[^>]*>/g, "").trim();
           if (folderName && folderName !== "Bookmarks" && folderName !== "书签栏") {
             currentFolder = folderName.substring(0, 50);
           }
@@ -802,16 +862,18 @@ app.post("/api/import", requireAuth, (req, res) => {
             if (!db.bookmarks.some((b: any) => b.url === url)) {
               let targetCat = db.categories.find((c: any) => c.name === currentFolder);
               if (!targetCat) {
+                const maxSortCat = db.categories.reduce((m: number, c: any) => Math.max(m, c.sortOrder || 0), 0);
                 targetCat = {
                   id: "cat-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
                   name: currentFolder,
                   icon: "Folder",
-                  sortOrder: db.categories.length + 1,
+                  sortOrder: maxSortCat + 1,
                   description: "从浏览器导入的分类目录"
                 };
                 db.categories.push(targetCat);
               }
 
+              const maxSortBm = db.bookmarks.reduce((m: number, b: any) => Math.max(m, b.sortOrder || 0), 0);
               db.bookmarks.push({
                 id: "bm-imp-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
                 title: title.substring(0, 150),
@@ -821,7 +883,7 @@ app.post("/api/import", requireAuth, (req, res) => {
                 icon: resolveFavicon(url),
                 tags: ["浏览器导入"],
                 clicks: 0,
-                sortOrder: db.bookmarks.length + 1,
+                sortOrder: maxSortBm + 1,
                 isPinned: false,
                 createdAt: new Date().toISOString()
               });
@@ -834,7 +896,7 @@ app.post("/api/import", requireAuth, (req, res) => {
       writeDb(db);
       return res.json({ 
         success: true, 
-        message: `成功解析并导入 ${importedCount} 个浏览器书签，已按文件夹自动归类！` 
+        message: `成功解析并安全导入 ${importedCount} 个浏览器书签，已按文件夹自动归类！` 
       });
     } else {
       return res.status(400).json({ error: "不支持的导入格式类型" });
@@ -844,7 +906,7 @@ app.post("/api/import", requireAuth, (req, res) => {
   }
 });
 
-// URL Metadata Preview Proxy Endpoint
+// URL Metadata Preview Proxy Endpoint with strict SSRF & domain checks
 app.get("/api/metadata", async (req, res) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) return res.status(400).json({ error: "URL 不能为空" });
@@ -854,9 +916,13 @@ app.get("/api/metadata", async (req, res) => {
     normalized = "https://" + normalized;
   }
 
+  if (!isSafeUrl(normalized)) {
+    return res.status(400).json({ error: "不安全或受限制的目标网址" });
+  }
+
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     const response = await fetch(normalized, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -873,19 +939,21 @@ app.get("/api/metadata", async (req, res) => {
 
     const html = await response.text();
     
-    // Extract title
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : "";
 
-    // Extract meta description
     const descMatch = html.match(/<meta\s+(?:name=["']description["']|property=["']og:description["'])\s+content=["']([^"']+)["']/i) ||
                       html.match(/<meta\s+content=["']([^"']+)["']\s+(?:name=["']description["']|property=["']og:description["'])/i);
     const description = descMatch ? descMatch[1].trim() : "";
 
-    // Extract og:image
     const imgMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i) ||
                      html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
-    const image = imgMatch ? imgMatch[1].trim() : "";
+    let image = imgMatch ? imgMatch[1].trim() : "";
+
+    // Validate og:image URL against SSRF
+    if (image && !isSafeUrl(image)) {
+      image = "";
+    }
 
     let hostname = "";
     try {
@@ -912,38 +980,32 @@ app.get("/api/metadata", async (req, res) => {
 app.get("/api/docs-spec", (req, res) => {
   res.json({
     title: "OmniMark RESTful API 文档与规范",
-    version: "1.2.0",
+    version: "1.3.0",
     baseUrl: "/api",
-    description: "提供完整的分类、书签 CRUD、拖拽重排、Favicon 本地缓存代理与插件一键采集接口，具备内置 SSRF 防护与速率限制。",
+    description: "提供企业级安全防护、密码哈希、SSRF 防御及多端同步的现代化书签与导航 API。",
     endpoints: [
-      { method: "GET", path: "/api/icon-proxy?domain=:domain&url=:url", description: "网站 Favicon 图标抓取并自动本地持久化缓存代理 (SSRF 防护)" },
-      { method: "GET", path: "/api/categories", description: "获取排序后的所有分类列表" },
-      { method: "POST", path: "/api/categories", description: "创建新分类 (需管理员权限)" },
-      { method: "PUT", path: "/api/categories/:id", description: "更新分类名称、图标及描述 (需管理员权限)" },
-      { method: "DELETE", path: "/api/categories/:id", description: "删除分类并安全迁移关联书签 (需管理员权限)" },
-      { method: "POST", path: "/api/categories/reorder", description: "分类拖拽批量重排顺序 (需管理员权限)" },
-      { method: "GET", path: "/api/bookmarks", description: "获取书签列表 (支持 query 参数: categoryId, search, tag)" },
-      { method: "POST", path: "/api/bookmarks", description: "添加新书签并智能解析 Favicon" },
-      { method: "PUT", path: "/api/bookmarks/:id", description: "更新书签信息 (需管理员权限)" },
-      { method: "DELETE", path: "/api/bookmarks/:id", description: "删除书签 (需管理员权限)" },
-      { method: "POST", path: "/api/bookmarks/:id/click", description: "记录书签点击次数与访问热度" },
-      { method: "POST", path: "/api/bookmarks/reorder", description: "书签拖拽与上下移批量重排 (需管理员权限)" },
-      { method: "POST", path: "/api/plugin/capture", description: "一键网页采集接口 (供浏览器插件或 JS 小书签调用)" },
-      { method: "GET", path: "/api/export?format=json|html", description: "导出全量书签数据 (支持浏览器标准 HTML 或 JSON 格式)" },
-      { method: "POST", path: "/api/import", description: "智能导入浏览器书签或 JSON 备份并自动归类 (需管理员权限)" },
-      { method: "GET", path: "/api/settings", description: "获取公开站点基本配置" },
-      { method: "PUT", path: "/api/settings", description: "更新系统配置与修改管理员密码 (需管理员权限)" }
+      { method: "GET", path: "/api/icon-proxy", description: "带大小限制与 SSRF 防护的 Favicon 缓存代理" },
+      { method: "GET", path: "/api/categories", description: "获取所有分类" },
+      { method: "POST", path: "/api/categories", description: "创建分类 (需鉴权)" },
+      { method: "GET", path: "/api/bookmarks", description: "获取书签列表 (置顶优先排序)" },
+      { method: "POST", path: "/api/bookmarks", description: "添加书签 (受 allowPublicSubmit 策略控制)" },
+      { method: "GET", path: "/api/export", description: "导出加密码脱敏的备份 (需鉴权)" },
+      { method: "POST", path: "/api/import", description: "安全导入备份 (需鉴权)" }
     ]
   });
 });
 
-// Global Express Error Handler
+// ==========================================
+// Middleware & SPA Fallback Order (Strict Correctness)
+// ==========================================
+
+// Global Express Error Handler (Must be after all routes)
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("Unhandled server error:", err);
   res.status(500).json({ error: "服务器内部异常，请稍后再试" });
 });
 
-// Vite middleware & static serving
+// Vite middleware & Production static serving with API 404 exclusion
 if (process.env.NODE_ENV !== "production") {
   const isHmrDisabled = process.env.DISABLE_HMR === "true";
   const vite = await createViteServer({
@@ -958,10 +1020,14 @@ if (process.env.NODE_ENV !== "production") {
   const distPath = path.join(process.cwd(), "dist");
   app.use(express.static(distPath));
   app.get("*", (req, res) => {
+    // Prevent SPA fallback from swallowing API 404s
+    if (req.path.startsWith("/api/")) {
+      return res.status(404).json({ error: "API route not found" });
+    }
     res.sendFile(path.join(distPath, "index.html"));
   });
 }
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`OmniMark server running on port ${PORT}`);
+  console.log(`OmniMark secure server running on port ${PORT}`);
 });

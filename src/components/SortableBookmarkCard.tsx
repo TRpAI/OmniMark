@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { motion } from "motion/react";
+import { motion, type Transition } from "motion/react";
 import { Bookmark, ViewMode } from "../types";
 import { Globe, ExternalLink, Copy, Check, GripVertical, MoreVertical, Pin } from "lucide-react";
 import { getCategoryBadgeStyle } from "../utils/categoryBadge";
@@ -36,7 +36,7 @@ function safeGetHostname(urlStr: string): string {
   }
 }
 
-const springTransition = {
+const springTransition: Transition = {
   layout: { type: "spring", stiffness: 340, damping: 28 },
   opacity: { duration: 0.18 },
 };

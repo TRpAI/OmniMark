@@ -5,30 +5,67 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OmniMark 站点导航与书签系统</title>
     <meta name="description" content="现代化极简站点导航与书签管理系统，支持多端同步、自定义分类、拖拽排序、浏览器书签导入导出、网页一键采集与自动抓取图标。" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Theme color for mobile browser status bar and PWA -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#2563eb" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a" />
+
+    <!-- Open Graph / Social Sharing -->
+    <meta property="og:site_name" content="OmniMark 站点导航与书签系统" />
+    <meta property="og:type" content="website" />
     <meta property="og:title" content="OmniMark 站点导航与书签系统" />
     <meta property="og:description" content="现代化极简站点导航与书签管理系统，支持多端同步、自定义分类、拖拽排序、浏览器书签导入导出、网页一键采集与自动抓取图标。" />
-    <meta property="og:type" content="website" />
+    <meta property="og:url" content="/" />
+    <meta property="og:image" content="/og-image.svg" />
+
+    <!-- Twitter Cards -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="OmniMark 站点导航与书签系统" />
+    <meta name="twitter:description" content="现代化极简站点导航与书签管理系统，支持多端同步、自定义分类、拖拽排序、浏览器书签导入导出、网页一键采集与自动抓取图标。" />
+    <meta name="twitter:image" content="/og-image.svg" />
+
     <script>
-      // Suppress benign container WebSocket / HMR connection failure rejections in sandbox
-      window.addEventListener('unhandledrejection', function(e) {
-        var reason = e && e.reason;
-        var msg = (reason && (reason.message || (typeof reason === 'string' ? reason : ''))) || '';
-        if (msg.toLowerCase().includes('websocket')) {
-          e.preventDefault();
-          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      // Target strictly known Vite HMR dev-server connection failures in sandboxed iframes.
+      // Avoid suppressing legitimate application WebSockets or interrupting error propagation.
+      const isViteHmrError = (msg) => {
+        if (!msg || typeof msg !== 'string') return false;
+        const lower = msg.toLowerCase();
+        return (
+          msg.includes('[vite]') && (lower.includes('websocket') || lower.includes('ws://') || lower.includes('failed to connect'))
+        ) || (
+          lower.includes('failed to connect to websocket') && (msg.includes('3000') || lower.includes('vite'))
+        );
+      };
+
+      window.addEventListener('unhandledrejection', (event) => {
+        const reason = event && event.reason;
+        const msg = (reason && (reason.message || (typeof reason === 'string' ? reason : ''))) || '';
+        if (isViteHmrError(msg)) {
+          event.preventDefault();
         }
       });
-      window.addEventListener('error', function(e) {
-        var msg = (e && (e.message || (typeof e === 'string' ? e : ''))) || '';
-        if (msg.toLowerCase().includes('websocket') || msg.includes('[vite]')) {
-          e.preventDefault();
-          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+
+      window.addEventListener('error', (event) => {
+        const msg = (event && (event.message || (typeof event === 'string' ? event : ''))) || '';
+        if (isViteHmrError(msg)) {
+          event.preventDefault();
         }
       });
     </script>
   </head>
   <body>
+    <noscript>
+      <div style="padding: 2.5rem 1.5rem; font-family: system-ui, -apple-system, sans-serif; text-align: center; color: #1e293b; background-color: #f8fafc; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+        <div style="width: 48px; height: 48px; margin-bottom: 1rem; border-radius: 12px; background: #2563eb; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 24px;">M</div>
+        <h1 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 0.75rem; color: #0f172a;">请启用 JavaScript 以运行 OmniMark</h1>
+        <p style="color: #64748b; max-width: 480px; line-height: 1.6; font-size: 0.95rem;">
+          OmniMark 站点导航与书签系统需要 JavaScript 提供书签动态索引、智能搜索与多端同步服务。请在浏览器设置中开启 JavaScript 后刷新本页面。
+        </p>
+      </div>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

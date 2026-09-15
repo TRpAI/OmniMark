@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="50%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#60a5fa"/>
+    </linearGradient>
+    <linearGradient id="badge-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  
+  <!-- Subtle decorative grid & glowing circles -->
+  <circle cx="1050" cy="150" r="300" fill="#2563eb" fill-opacity="0.12" filter="blur(80px)"/>
+  <circle cx="150" cy="480" r="250" fill="#3b82f6" fill-opacity="0.08" filter="blur(60px)"/>
+
+  <!-- Center Card Content -->
+  <g transform="translate(160, 160)">
+    <!-- App Icon -->
+    <rect width="112" height="112" rx="24" fill="url(#badge-grad)"/>
+    <path d="M42 28H70C72.2 28 74 29.8 74 32V84L56 71L38 84V32C38 29.8 39.8 28 42 28Z" fill="#ffffff"/>
+    <circle cx="56" cy="46" r="7" fill="#2563eb"/>
+
+    <!-- App Title & Description -->
+    <text x="144" y="60" fill="#ffffff" font-family="system-ui, -apple-system, sans-serif" font-size="52" font-weight="700" letter-spacing="-0.02em">OmniMark</text>
+    <text x="144" y="98" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="400">站点导航与书签系统</text>
+
+    <!-- Subtitle text -->
+    <text x="0" y="190" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="30" font-weight="500">现代化极简站点导航与书签管理系统</text>
+    <text x="0" y="240" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="400">支持多端同步 · 自定义分类 · 拖拽排序 · 网页一键采集 · 智能图标抓取</text>
+
+    <!-- Badges -->
+    <g transform="translate(0, 290)">
+      <rect width="130" height="38" rx="19" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+      <text x="65" y="24" fill="#93c5fd" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" text-anchor="middle">多视图布局</text>
+
+      <rect x="146" width="130" height="38" rx="19" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+      <text x="211" y="24" fill="#93c5fd" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" text-anchor="middle">浏览器导入</text>
+
+      <rect x="292" width="130" height="38" rx="19" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+      <text x="357" y="24" fill="#93c5fd" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" text-anchor="middle">边缘部署</text>
+
+      <rect x="438" width="130" height="38" rx="19" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+      <text x="503" y="24" fill="#93c5fd" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" text-anchor="middle">安全哈希</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="omni-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#1e3a8a" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <!-- App Icon Background -->
+  <rect width="128" height="128" rx="28" fill="url(#omni-grad)"/>
+  <!-- Inner Bookmark Emblem -->
+  <g filter="url(#shadow)">
+    <path d="M40 28H88C91.3137 28 94 30.6863 94 34V100L64 82L34 100V34C34 30.6863 36.6863 28 40 28Z" fill="#ffffff" fill-opacity="0.95"/>
+    <circle cx="64" cy="52" r="10" fill="#2563eb"/>
+    <path d="M64 46L66 50L70 52L66 54L64 58L62 54L58 52L62 50L64 46Z" fill="#ffffff"/>
+  </g>
+</svg>
