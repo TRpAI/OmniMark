@@ -65,6 +65,10 @@ export interface Env {
   cache_kv?: KVNamespace;
   kv?: KVNamespace;
   ENVIRONMENT?: string;
+  ADMIN_PASSWORD?: string;
+  ADMIN_PASSWORD_HASH?: string;
+  OMNIMARK_ADMIN_PASSWORD?: string;
+  OMNIMARK_INITIAL_ADMIN_PASSWORD?: string;
   GEMINI_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
   [key: string]: any;
@@ -172,19 +176,25 @@ async function ensureTables(db: D1Database, env?: Env): Promise<void> {
 
         // Seed default settings with PBKDF2 hash if empty
         const adminPass = await db.prepare("SELECT value FROM settings WHERE key = 'adminPasswordHash'").first<any>();
-        if (!adminPass) {
-          const envPassword = env?.OMNIMARK_INITIAL_ADMIN_PASSWORD || env?.ADMIN_PASSWORD;
-          const initialPassword = envPassword || ("omni_" + generateSecureToken().substring(0, 12));
-          const initialHash = await hashPasswordPBKDF2(initialPassword);
+        const envPassword = env?.ADMIN_PASSWORD || env?.OMNIMARK_ADMIN_PASSWORD || env?.OMNIMARK_INITIAL_ADMIN_PASSWORD;
+        const envHash = env?.ADMIN_PASSWORD_HASH;
+
+        if (!adminPass || !adminPass.value) {
+          let initialHash = "";
+          if (envHash && typeof envHash === "string" && envHash.trim()) {
+            initialHash = envHash.trim();
+          } else {
+            const initialPassword = envPassword || ("omni_" + generateSecureToken().substring(0, 12));
+            initialHash = await hashPasswordPBKDF2(initialPassword);
+            if (!envPassword) {
+              console.log(`[OmniMark Worker] 数据库首次初始化，未在 Cloudflare 环境变量中检测到 ADMIN_PASSWORD，已自动生成初始管理员密码: ${initialPassword}`);
+            }
+          }
 
           await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(initialHash)).run();
           await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteName', ?)").bind(JSON.stringify("OmniMark 导航与书签")).run();
           await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteSubtitle', ?)").bind(JSON.stringify("极简、高效、多端同步的现代化站点导航与书签管理系统")).run();
           await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('allowPublicSubmit', ?)").bind(JSON.stringify(false)).run();
-
-          if (!envPassword) {
-            console.log(`[OmniMark Worker] 数据库首次初始化，已生成初始管理员密码: ${initialPassword}`);
-          }
         }
 
         // Seed default categories if empty
@@ -448,11 +458,42 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         }
       }
 
-      const { valid, needsUpgrade } = await verifyPasswordPBKDF2(password || "", storedHash);
+      const envPlainPassword = env?.ADMIN_PASSWORD || env?.OMNIMARK_ADMIN_PASSWORD || env?.OMNIMARK_INITIAL_ADMIN_PASSWORD;
+      const envPasswordHash = env?.ADMIN_PASSWORD_HASH;
+
+      let valid = false;
+      let needsUpgrade = false;
+
+      // 1. Verify against D1 stored hash
+      if (storedHash) {
+        const res = await verifyPasswordPBKDF2(password || "", storedHash);
+        if (res.valid) {
+          valid = true;
+          needsUpgrade = res.needsUpgrade;
+        }
+      }
+
+      // 2. Verify against Cloudflare environment variable plaintext password
+      if (!valid && envPlainPassword && typeof envPlainPassword === "string" && envPlainPassword.trim()) {
+        if (password === envPlainPassword.trim()) {
+          valid = true;
+          needsUpgrade = true; // Sync PBKDF2 hash to D1
+        }
+      }
+
+      // 3. Verify against Cloudflare environment variable password hash
+      if (!valid && envPasswordHash && typeof envPasswordHash === "string" && envPasswordHash.trim()) {
+        const res = await verifyPasswordPBKDF2(password || "", envPasswordHash.trim());
+        if (res.valid) {
+          valid = true;
+          needsUpgrade = res.needsUpgrade;
+        }
+      }
+
       if (valid) {
         clearLoginFailures(clientIp);
 
-        // Auto-upgrade legacy hash to PBKDF2 if applicable
+        // Auto-upgrade / sync PBKDF2 hash into D1 if applicable
         if (needsUpgrade && d1Bound) {
           const upgradedHash = await hashPasswordPBKDF2(password);
           await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(upgradedHash)).run();
@@ -601,7 +642,22 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           try { storedHash = JSON.parse(row.value); } catch { storedHash = row.value; }
         }
 
-        const { valid } = await verifyPasswordPBKDF2(currentPassword, storedHash);
+        const envPlainPassword = env?.ADMIN_PASSWORD || env?.OMNIMARK_ADMIN_PASSWORD || env?.OMNIMARK_INITIAL_ADMIN_PASSWORD;
+        const envPasswordHash = env?.ADMIN_PASSWORD_HASH;
+
+        let valid = false;
+        if (storedHash) {
+          const res = await verifyPasswordPBKDF2(currentPassword, storedHash);
+          if (res.valid) valid = true;
+        }
+        if (!valid && envPlainPassword && typeof envPlainPassword === "string" && currentPassword === envPlainPassword.trim()) {
+          valid = true;
+        }
+        if (!valid && envPasswordHash && typeof envPasswordHash === "string") {
+          const res = await verifyPasswordPBKDF2(currentPassword, envPasswordHash.trim());
+          if (res.valid) valid = true;
+        }
+
         if (!valid) {
           return new Response(JSON.stringify({ error: "当前管理员密码不正确" }), { status: 401, headers: corsHeaders });
         }

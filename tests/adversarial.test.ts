@@ -343,3 +343,19 @@ test("Zod Schema Defense: Bookmark, Category, Login, and Password Change boundar
   assert.equal(MetadataExtractSchema.safeParse({ url: "http://localhost:3000" }).success, false);
   assert.equal(MetadataExtractSchema.safeParse({ url: "http://169.254.169.254/metadata" }).success, false);
 });
+
+/**
+ * Suite 7: Environment Variable (Cloudflare Vars/Secrets & Node env) Admin Password Resolution
+ */
+test("Environment Variable Admin Password Defense: Support ADMIN_PASSWORD and ADMIN_PASSWORD_HASH", async () => {
+  const cfEnvVarPassword = "CloudflareCustomPass2026!";
+  const customHash = await hashPasswordPBKDF2(cfEnvVarPassword);
+
+  // 1. Password verification against PBKDF2 hash from env
+  const hashVerify = await verifyPasswordPBKDF2("CloudflareCustomPass2026!", customHash);
+  assert.equal(hashVerify.valid, true);
+
+  // 2. Wrong password rejection
+  const wrongVerify = await verifyPasswordPBKDF2("WrongPassword123", customHash);
+  assert.equal(wrongVerify.valid, false);
+});

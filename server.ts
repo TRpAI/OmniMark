@@ -534,12 +534,42 @@ app.post("/api/auth/login", async (req, res) => {
 
   const { password } = req.body;
   const db = readDb();
+  const envPlainPassword = process.env.ADMIN_PASSWORD || process.env.OMNIMARK_ADMIN_PASSWORD || process.env.OMNIMARK_INITIAL_ADMIN_PASSWORD;
+  const envPasswordHash = process.env.ADMIN_PASSWORD_HASH;
 
-  const { valid, needsUpgrade } = await verifyPasswordPBKDF2(password || "", db.settings.adminPasswordHash);
-  if (valid) {
+  let isValid = false;
+  let needsUpgrade = false;
+
+  // 1. Verify against database stored hash
+  if (db.settings.adminPasswordHash) {
+    const res = await verifyPasswordPBKDF2(password || "", db.settings.adminPasswordHash);
+    if (res.valid) {
+      isValid = true;
+      needsUpgrade = res.needsUpgrade;
+    }
+  }
+
+  // 2. Verify against plaintext environment variable if not already matched
+  if (!isValid && envPlainPassword && typeof envPlainPassword === "string" && envPlainPassword.trim()) {
+    if (password === envPlainPassword.trim()) {
+      isValid = true;
+      needsUpgrade = true; // Sync PBKDF2 hash to DB
+    }
+  }
+
+  // 3. Verify against environment variable password hash
+  if (!isValid && envPasswordHash && typeof envPasswordHash === "string" && envPasswordHash.trim()) {
+    const res = await verifyPasswordPBKDF2(password || "", envPasswordHash.trim());
+    if (res.valid) {
+      isValid = true;
+      needsUpgrade = res.needsUpgrade;
+    }
+  }
+
+  if (isValid) {
     clearLoginFailures(clientIp);
 
-    // If legacy hash was verified or iterations < 600k, seamlessly upgrade to PBKDF2 with 600,000 iterations and fresh salt
+    // If legacy hash was verified or iterations < 600k or matched via env var, seamlessly upgrade to PBKDF2
     if (needsUpgrade) {
       db.settings.adminPasswordHash = await hashPasswordPBKDF2(password);
       writeDb(db);

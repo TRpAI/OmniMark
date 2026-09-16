@@ -89,7 +89,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
                 <div>
                   <h3 className="font-bold text-base tracking-tight">管理员登录</h3>
-                  <p className="text-[11px] text-slate-400">默认管理密码: admin123</p>
+                  <p className="text-[11px] text-slate-400">请输入安全凭证以进入管理后台</p>
                 </div>
               </div>
               <button
