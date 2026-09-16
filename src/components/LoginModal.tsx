@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { X, Shield, Key, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { safeFetchJson } from "../utils/security";
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -31,8 +32,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      const data = await safeFetchJson<{ success?: boolean; token?: string; error?: string }>(res, { success: false, error: "登录响应异常" });
+      if (res.ok && data.success && data.token) {
         onLoginSuccess(data.token);
         setPassword("");
         onClose();

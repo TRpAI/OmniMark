@@ -16,7 +16,7 @@ export const BookmarkletModal: React.FC<BookmarkletModalProps> = ({
 
   if (!isOpen) return null;
 
-  const bookmarkletCode = `javascript:(function(){const url=window.location.href;const title=document.title;const desc=document.querySelector('meta[name="description"]')?.content||'';fetch('${window.location.origin}/api/plugin/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,title,description:desc})}).then(r=>r.json()).then(d=>{alert('成功采集到 OmniMark：'+title);}).catch(e=>alert('采集失败：'+e.message);})();`;
+  const bookmarkletCode = `javascript:(function(){const url=window.location.href;const title=document.title;const desc=document.querySelector('meta[name="description"]')?.content||'';fetch('${window.location.origin}/api/plugin/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,title,description:desc})}).then(r=>r.text()).then(t=>{const d=t?JSON.parse(t):{};alert('成功采集到 OmniMark：'+title);}).catch(e=>alert('采集失败：'+e.message);})();`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(bookmarkletCode);

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Bookmark, Category, SiteSettings, ViewMode, CloudflareSystemStatus } from "./types";
+import { safeFetchJson } from "./utils/security";
 import { Navbar } from "./components/Navbar";
 import { FrontendView } from "./components/FrontendView";
 import { AdminView } from "./components/AdminView";
@@ -18,7 +19,6 @@ export default function App() {
   const [settings, setSettings] = useState<SiteSettings>({
     siteName: "OmniMark 站点导航与书签系统",
     siteSubtitle: "现代化极简站点导航与书签管理系统",
-    adminPasswordHash: "admin123",
     defaultViewMode: "grid",
     allowPublicSubmit: false,
     enableWeather: true,
@@ -68,8 +68,8 @@ export default function App() {
     try {
       const res = await fetch("/api/system/status");
       if (res.ok) {
-        const data = await res.json();
-        setSystemStatus(data);
+        const data = await safeFetchJson(res, null);
+        if (data) setSystemStatus(data);
       }
     } catch (err) {
       console.error("Failed to load system status:", err);
@@ -97,19 +97,21 @@ export default function App() {
       }
 
       if (catRes.ok) {
-        const catData = await catRes.json();
-        setCategories(catData);
+        const catData = await safeFetchJson(catRes, []);
+        if (Array.isArray(catData)) setCategories(catData);
       }
       if (bmRes.ok) {
-        const bmData = await bmRes.json();
-        setBookmarks(bmData);
+        const bmData = await safeFetchJson(bmRes, []);
+        if (Array.isArray(bmData)) setBookmarks(bmData);
       }
       if (setRes.ok) {
-        const setData = await setRes.json();
-        setSettings(setData);
-        // Only initialize viewMode on first load if user has no saved preference in localStorage
-        if (isInitial && !localStorage.getItem("omnimark_view_mode") && setData.defaultViewMode) {
-          setViewMode(setData.defaultViewMode);
+        const setData = await safeFetchJson(setRes, null);
+        if (setData) {
+          setSettings(setData);
+          // Only initialize viewMode on first load if user has no saved preference in localStorage
+          if (isInitial && !localStorage.getItem("omnimark_view_mode") && setData.defaultViewMode) {
+            setViewMode(setData.defaultViewMode);
+          }
         }
       }
     } catch (err) {
@@ -128,12 +130,41 @@ export default function App() {
       setAuthToken(token);
     }
 
-    // Polling mechanism (every 15 seconds) to ensure UI state is synchronized with D1 database
-    const pollInterval = setInterval(() => {
-      loadData(false);
-    }, 15000);
+    // Verify session validity via HttpOnly cookie or token
+    fetch("/api/auth/me", {
+      credentials: "same-origin",
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    }).then(res => {
+      if (res.ok) {
+        setIsLoggedIn(true);
+      } else if (res.status === 401 && token) {
+        // Token in localStorage is expired or invalidated
+        localStorage.removeItem("omnimark_token");
+        setIsLoggedIn(false);
+        setAuthToken(null);
+      }
+    }).catch(() => {});
 
-    return () => clearInterval(pollInterval);
+    // Revalidate data on tab visibility change or window focus (eliminating unnecessary 15s polling)
+    let lastFetchTime = Date.now();
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === "visible") {
+        // Debounce: only re-fetch if at least 30 seconds have passed since last load
+        const now = Date.now();
+        if (now - lastFetchTime > 30000) {
+          lastFetchTime = now;
+          loadData(false);
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+    window.addEventListener("focus", handleVisibilityOrFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+    };
   }, []);
 
   // Sync document title with site settings
@@ -167,11 +198,21 @@ export default function App() {
     setIsAdminMode(true);
   };
 
-  const handleLogout = () => {
-    setIsLoggedIn(false);
-    setAuthToken(null);
-    localStorage.removeItem("omnimark_token");
-    setIsAdminMode(false);
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      });
+    } catch (e) {
+      console.error("Logout request failed:", e);
+    } finally {
+      setIsLoggedIn(false);
+      setAuthToken(null);
+      localStorage.removeItem("omnimark_token");
+      setIsAdminMode(false);
+    }
   };
 
   const openBookmarkModal = (bm?: Bookmark) => {

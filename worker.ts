@@ -10,20 +10,27 @@ import {
   hashPasswordPBKDF2,
   verifyPasswordPBKDF2,
   generateSecureToken,
+  hashSessionToken,
+  validatePasswordStrength,
+  MIN_ADMIN_PASSWORD_LENGTH,
+  createSessionCookie,
+  createClearSessionCookie,
+  extractSessionToken,
   isSafeDomain,
   isSafeUrl,
   parseNetscapeBookmarks,
   escapeHtml,
   PUBLIC_SETTINGS_KEYS,
+  ADMIN_SAFE_SETTINGS_KEYS,
+  sanitizeSettingsForAdmin,
+  sanitizeSettingsForPublic,
   CLICK_ROUTE_REGEX,
   CATEGORY_ITEM_ROUTE_REGEX,
   BOOKMARK_ITEM_ROUTE_REGEX,
   parseSessionExpiresAt,
-  isSessionValid
+  isSessionValid,
+  validateDnsWithDoH
 } from "./src/utils/security.ts";
-
-// Default PBKDF2 hash for initial installation (admin123, 100,000 iterations, 32-byte salt)
-const DEFAULT_ADMIN_HASH = "pbkdf2:sha256:100000:23fb0c6cda199c36b92eb7ab502043b6:8a3adcb7fcaf7581a527a62a6cdd974ea8324b1a1bc8077f2ebfb7758a65063d";
 
 declare global {
   interface D1Database {
@@ -38,7 +45,7 @@ declare global {
     run(): Promise<any>;
   }
   interface KVNamespace {
-    get(key: string, options?: { type?: string; cacheTtl?: number }): Promise<any>;
+    get(key: string, typeOrOptions?: string | { type?: string; cacheTtl?: number }): Promise<any>;
     put(key: string, value: string | ArrayBuffer | ReadableStream, options?: { expiration?: number; expirationTtl?: number }): Promise<void>;
     delete(key: string): Promise<void>;
   }
@@ -100,90 +107,120 @@ function isRealKV(val: any): boolean {
   return typeof val.getWithMetadata === "function" || typeof val.delete === "function";
 }
 
-// Initial database schema bootstrap & seeding
+// Initial database schema bootstrap & seeding with concurrency mutex
 let tablesEnsured = false;
-async function ensureTables(db: D1Database) {
+let initPromise: Promise<void> | null = null;
+
+async function ensureTables(db: D1Database, env?: Env): Promise<void> {
   if (tablesEnsured) return;
-  try {
-    if (!isRealD1(db)) return;
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      )
-    `).run();
+  if (!isRealD1(db)) return;
 
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS categories (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        icon TEXT,
-        sortOrder INTEGER,
-        description TEXT
-      )
-    `).run();
+  if (!initPromise) {
+    initPromise = (async () => {
+      try {
+        await db.prepare(`
+          CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+          )
+        `).run();
 
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS bookmarks (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        url TEXT,
-        description TEXT,
-        categoryId TEXT,
-        icon TEXT,
-        tags TEXT,
-        clicks INTEGER,
-        sortOrder INTEGER,
-        isPinned INTEGER,
-        createdAt TEXT
-      )
-    `).run();
+        await db.prepare(`
+          CREATE TABLE IF NOT EXISTS categories (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            icon TEXT,
+            sortOrder INTEGER,
+            description TEXT
+          )
+        `).run();
 
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS admin_sessions (
-        token TEXT PRIMARY KEY,
-        expiresAt INTEGER
-      )
-    `).run();
+        await db.prepare(`
+          CREATE TABLE IF NOT EXISTS bookmarks (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            url TEXT,
+            description TEXT,
+            categoryId TEXT,
+            icon TEXT,
+            tags TEXT,
+            clicks INTEGER,
+            sortOrder INTEGER,
+            isPinned INTEGER,
+            createdAt TEXT
+          )
+        `).run();
 
-    // Seed default settings with PBKDF2 hash if empty
-    const adminPass = await db.prepare("SELECT value FROM settings WHERE key = 'adminPasswordHash'").first<any>();
-    if (!adminPass) {
-      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(DEFAULT_ADMIN_HASH)).run();
-      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteName', ?)").bind(JSON.stringify("OmniMark 导航与书签")).run();
-      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteSubtitle', ?)").bind(JSON.stringify("极简、高效、多端同步的现代化站点导航与书签管理系统")).run();
-      await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('allowPublicSubmit', ?)").bind(JSON.stringify(false)).run();
-    }
+        await db.prepare(`
+          CREATE TABLE IF NOT EXISTS admin_sessions (
+            token TEXT PRIMARY KEY,
+            tokenHash TEXT,
+            expiresAt INTEGER
+          )
+        `).run();
 
-    // Seed default categories if empty
-    const catCount = await db.prepare("SELECT COUNT(*) as count FROM categories").first<any>();
-    if (!catCount || catCount.count === 0) {
-      const defaultCats = [
-        { id: "cat-1", name: "常用推荐", icon: "Star", sortOrder: 1, description: "高频使用的日常核心工具" },
-        { id: "cat-2", name: "开发运维", icon: "Code", sortOrder: 2, description: "编程、框架、云服务与终端工具" },
-        { id: "cat-3", name: "AI 与前沿", icon: "Sparkles", sortOrder: 3, description: "大模型、人工智能与创新科技" },
-        { id: "cat-4", name: "设计灵感", icon: "Palette", sortOrder: 4, description: "UI/UX、图片素材、配色与字体" },
-        { id: "cat-5", name: "学习社区", icon: "BookOpen", sortOrder: 5, description: "文档、博客、技术论坛与教程" }
-      ];
-      for (const c of defaultCats) {
-        await db.prepare("INSERT OR REPLACE INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
-          .bind(c.id, c.name, c.icon, c.sortOrder, c.description).run();
+        // Performance Indexes for high-throughput navigation
+        try {
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(categoryId)").run();
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_bookmarks_sort ON bookmarks(sortOrder)").run();
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_bookmarks_isPinned ON bookmarks(isPinned)").run();
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_categories_sort ON categories(sortOrder)").run();
+          await db.prepare("CREATE INDEX IF NOT EXISTS idx_admin_sessions_token_hash ON admin_sessions(tokenHash)").run();
+        } catch (idxErr) {
+          // Non-blocking if index already exists in sqlite
+        }
+
+        // Seed default settings with PBKDF2 hash if empty
+        const adminPass = await db.prepare("SELECT value FROM settings WHERE key = 'adminPasswordHash'").first<any>();
+        if (!adminPass) {
+          const envPassword = env?.OMNIMARK_INITIAL_ADMIN_PASSWORD || env?.ADMIN_PASSWORD;
+          const initialPassword = envPassword || ("omni_" + generateSecureToken().substring(0, 12));
+          const initialHash = await hashPasswordPBKDF2(initialPassword);
+
+          await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(initialHash)).run();
+          await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteName', ?)").bind(JSON.stringify("OmniMark 导航与书签")).run();
+          await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('siteSubtitle', ?)").bind(JSON.stringify("极简、高效、多端同步的现代化站点导航与书签管理系统")).run();
+          await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('allowPublicSubmit', ?)").bind(JSON.stringify(false)).run();
+
+          if (!envPassword) {
+            console.log(`[OmniMark Worker] 数据库首次初始化，已生成初始管理员密码: ${initialPassword}`);
+          }
+        }
+
+        // Seed default categories if empty
+        const catCount = await db.prepare("SELECT COUNT(*) as count FROM categories").first<any>();
+        if (!catCount || catCount.count === 0) {
+          const defaultCats = [
+            { id: "cat-1", name: "常用推荐", icon: "Star", sortOrder: 1, description: "高频使用的日常核心工具" },
+            { id: "cat-2", name: "开发运维", icon: "Code", sortOrder: 2, description: "编程、框架、云服务与终端工具" },
+            { id: "cat-3", name: "AI 与前沿", icon: "Sparkles", sortOrder: 3, description: "大模型、人工智能与创新科技" },
+            { id: "cat-4", name: "设计灵感", icon: "Palette", sortOrder: 4, description: "UI/UX、图片素材、配色与字体" },
+            { id: "cat-5", name: "学习社区", icon: "BookOpen", sortOrder: 5, description: "文档、博客、技术论坛与教程" }
+          ];
+          for (const c of defaultCats) {
+            await db.prepare("INSERT OR REPLACE INTO categories (id, name, icon, sortOrder, description) VALUES (?, ?, ?, ?, ?)")
+              .bind(c.id, c.name, c.icon, c.sortOrder, c.description).run();
+          }
+        }
+
+        tablesEnsured = true;
+      } catch (e) {
+        console.error("D1 ensureTables error:", e);
+      } finally {
+        initPromise = null;
       }
-    }
-
-    tablesEnsured = true;
-  } catch (e) {
-    console.error("D1 ensureTables error:", e);
+    })();
   }
+
+  return initPromise;
 }
 
-// Authentication middleware with strict Header-only check, session expiration, and non-bypass security
+// Authentication middleware with HttpOnly Cookie priority and Bearer token fallback
 async function requireAuth(request: Request, env: Env): Promise<Response | null> {
-  const authHeader = request.headers.get("Authorization");
-  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+  const token = extractSessionToken(request.headers);
 
   if (!token) {
-    return new Response(JSON.stringify({ error: "未授权：请先通过 Authorization 请求头提供管理员令牌" }), {
+    return new Response(JSON.stringify({ error: "未授权：请先登录管理员账户以执行该操作" }), {
       status: 401,
       headers: { "Content-Type": "application/json" }
     });
@@ -198,7 +235,12 @@ async function requireAuth(request: Request, env: Env): Promise<Response | null>
   }
 
   try {
-    const session = await env.DB.prepare("SELECT token, expiresAt FROM admin_sessions WHERE token = ?").bind(token).first<any>();
+    const tokenHash = await hashSessionToken(token);
+    // Support matching by SHA-256 tokenHash (preferred) or legacy raw token
+    const session = await env.DB.prepare(
+      "SELECT tokenHash, expiresAt FROM admin_sessions WHERE tokenHash = ? OR token = ?"
+    ).bind(tokenHash, token).first<any>();
+
     if (!session) {
       return new Response(JSON.stringify({ error: "未授权：登录令牌无效或已被注销，请重新登录" }), {
         status: 401,
@@ -207,7 +249,7 @@ async function requireAuth(request: Request, env: Env): Promise<Response | null>
     }
 
     if (!isSessionValid(session)) {
-      await env.DB!.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
+      await env.DB!.prepare("DELETE FROM admin_sessions WHERE tokenHash = ? OR token = ?").bind(tokenHash, token).run();
       return new Response(JSON.stringify({ error: "登录会话已过期，请重新登录" }), {
         status: 401,
         headers: { "Content-Type": "application/json" }
@@ -254,7 +296,12 @@ function clearLoginFailures(ip: string) {
 async function invalidateCache(env: Env) {
   if (env.CACHE_KV) {
     try {
-      await env.CACHE_KV.delete("omnimark:api:data");
+      await Promise.allSettled([
+        env.CACHE_KV.delete("cache:categories"),
+        env.CACHE_KV.delete("cache:bookmarks"),
+        env.CACHE_KV.delete("cache:settings:public"),
+        env.CACHE_KV.delete("omnimark:api:data")
+      ]);
     } catch {}
   }
 }
@@ -328,7 +375,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
   if (kvBound) env.CACHE_KV = activeKV;
 
   if (d1Bound) {
-    await ensureTables(env.DB!);
+    await ensureTables(env.DB!, env);
   }
 
   try {
@@ -412,13 +459,20 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         }
 
         const token = generateSecureToken();
+        const tokenHash = await hashSessionToken(token);
         const expiresAt = Date.now() + 86400000 * 7; // 7 days expiration in ms
         if (d1Bound) {
           try {
-            await env.DB!.prepare("INSERT OR REPLACE INTO admin_sessions (token, expiresAt) VALUES (?, ?)").bind(token, expiresAt).run();
+            await env.DB!.prepare("INSERT OR REPLACE INTO admin_sessions (token, tokenHash, expiresAt) VALUES (?, ?, ?)").bind(token, tokenHash, expiresAt).run();
           } catch {}
         }
-        return new Response(JSON.stringify({ success: true, token, expiresAt }), { headers: corsHeaders });
+
+        const isHttps = url.protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
+        const cookieHeader = createSessionCookie(token, { secure: isHttps });
+        const responseHeaders = new Headers(corsHeaders);
+        responseHeaders.append("Set-Cookie", cookieHeader);
+
+        return new Response(JSON.stringify({ success: true, token, expiresAt }), { headers: responseHeaders });
       }
 
       recordLoginFailure(clientIp);
@@ -427,14 +481,20 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
 
     // 3.1 Admin Logout
     if (path === "/api/auth/logout" && method === "POST") {
-      const authHeader = request.headers.get("Authorization");
-      const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+      const token = extractSessionToken(request.headers);
       if (token && d1Bound) {
         try {
-          await env.DB!.prepare("DELETE FROM admin_sessions WHERE token = ?").bind(token).run();
+          const tokenHash = await hashSessionToken(token);
+          await env.DB!.prepare("DELETE FROM admin_sessions WHERE tokenHash = ? OR token = ?").bind(tokenHash, token).run();
         } catch {}
       }
-      return new Response(JSON.stringify({ success: true, message: "已安全退出登录" }), { headers: corsHeaders });
+
+      const isHttps = url.protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
+      const clearCookie = createClearSessionCookie({ secure: isHttps });
+      const responseHeaders = new Headers(corsHeaders);
+      responseHeaders.append("Set-Cookie", clearCookie);
+
+      return new Response(JSON.stringify({ success: true, message: "已安全退出登录" }), { headers: responseHeaders });
     }
 
     // 3.2 Verify Current Admin Session Status
@@ -444,8 +504,37 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true, authenticated: true, role: "admin" }), { headers: corsHeaders });
     }
 
-    // 4. Get Settings (Whitelisted for Public, Full Safe for Admin)
+    // 4. Get Settings (Whitelisted for Public with KV Cache, Full Safe for Admin)
     if (path === "/api/settings" && method === "GET") {
+      // Check if request is from an authenticated admin
+      const token = extractSessionToken(request.headers);
+      let isAdmin = false;
+      if (token && d1Bound) {
+        try {
+          const tokenHash = await hashSessionToken(token);
+          const session = await env.DB!.prepare(
+            "SELECT tokenHash, expiresAt FROM admin_sessions WHERE tokenHash = ? OR token = ?"
+          ).bind(tokenHash, token).first<any>();
+          if (session && isSessionValid(session)) {
+            isAdmin = true;
+          }
+        } catch {}
+      }
+
+      // If public visitor, check Read-Through KV cache first
+      if (!isAdmin && env.CACHE_KV) {
+        try {
+          const cachedPublic = await env.CACHE_KV.get("cache:settings:public", "text");
+          if (cachedPublic) {
+            const hitHeaders = new Headers(corsHeaders);
+            hitHeaders.set("Content-Type", "application/json");
+            hitHeaders.set("CF-Cache-Status", "HIT");
+            hitHeaders.set("X-Cache", "HIT");
+            return new Response(cachedPublic, { headers: hitHeaders });
+          }
+        } catch {}
+      }
+
       let settingsObj: any = {
         siteName: "OmniMark 站点导航",
         siteSubtitle: "极简优雅的前后端分离导航与书签系统",
@@ -471,31 +560,25 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
 
       delete settingsObj.adminPasswordHash;
 
-      // Check if request is from an authenticated admin
-      const authHeader = request.headers.get("Authorization");
-      const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
-      let isAdmin = false;
-      if (token && d1Bound) {
-        try {
-          const session = await env.DB!.prepare("SELECT token, expiresAt FROM admin_sessions WHERE token = ?").bind(token).first<any>();
-          if (session && isSessionValid(session)) {
-            isAdmin = true;
-          }
-        } catch {}
-      }
-
       if (isAdmin) {
-        return new Response(JSON.stringify(settingsObj), { headers: corsHeaders });
+        const adminSettings = sanitizeSettingsForAdmin(settingsObj, {
+          hasEnvGeminiKey: Boolean(env.GEMINI_API_KEY),
+          hasEnvCfToken: Boolean(env.CLOUDFLARE_API_TOKEN)
+        });
+        return new Response(JSON.stringify(adminSettings), { headers: corsHeaders });
       }
 
-      // Public visitors: Whitelist public fields only
-      const publicSettings: Record<string, any> = {};
-      for (const key of PUBLIC_SETTINGS_KEYS) {
-        if (settingsObj[key] !== undefined) {
-          publicSettings[key] = settingsObj[key];
-        }
+      // Public visitors: Whitelist public fields and populate KV cache
+      const publicSettings = sanitizeSettingsForPublic(settingsObj);
+      const publicJson = JSON.stringify(publicSettings);
+      if (env.CACHE_KV) {
+        ctx.waitUntil(env.CACHE_KV.put("cache:settings:public", publicJson, { expirationTtl: 86400 }));
       }
-      return new Response(JSON.stringify(publicSettings), { headers: corsHeaders });
+      const missHeaders = new Headers(corsHeaders);
+      missHeaders.set("Content-Type", "application/json");
+      missHeaders.set("CF-Cache-Status", "MISS");
+      missHeaders.set("X-Cache", "MISS");
+      return new Response(publicJson, { headers: missHeaders });
     }
 
     // 5. Update Settings (PUT /api/settings) - Protected & Whitelisted
@@ -522,8 +605,9 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         if (!valid) {
           return new Response(JSON.stringify({ error: "当前管理员密码不正确" }), { status: 401, headers: corsHeaders });
         }
-        if (typeof newPassword !== "string" || newPassword.length < 6) {
-          return new Response(JSON.stringify({ error: "新密码长度不能少于 6 位" }), { status: 400, headers: corsHeaders });
+        const strength = validatePasswordStrength(newPassword);
+        if (!strength.valid) {
+          return new Response(JSON.stringify({ error: strength.error }), { status: 400, headers: corsHeaders });
         }
         const newHash = await hashPasswordPBKDF2(newPassword);
         await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(newHash)).run();
@@ -532,24 +616,39 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         await env.DB!.prepare("DELETE FROM admin_sessions").run();
       }
 
-      const allowedKeys = [
-        "siteName", "siteSubtitle", "announcement", "defaultViewMode",
-        "allowPublicSubmit", "enableWeather", "enableSearchEngine", "defaultSearchEngine",
-        "geminiApiKey", "cfApiToken", "cfAccountId", "cfD1DatabaseId", "cfKvNamespaceId"
-      ];
-
-      for (const key of allowedKeys) {
+      for (const key of ADMIN_SAFE_SETTINGS_KEYS) {
         if (rest[key] !== undefined) {
           await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, JSON.stringify(rest[key])).run();
         }
+      }
+
+      // Securely update secrets if non-empty write-only values were submitted
+      if (typeof rest.geminiApiKey === "string" && rest.geminiApiKey.trim()) {
+        await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('geminiApiKey', ?)").bind(JSON.stringify(rest.geminiApiKey.trim())).run();
+      }
+      if (typeof rest.cfApiToken === "string" && rest.cfApiToken.trim()) {
+        await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cfApiToken', ?)").bind(JSON.stringify(rest.cfApiToken.trim())).run();
       }
 
       await invalidateCache(env);
       return new Response(JSON.stringify({ success: true, message: "系统配置已保存" }), { headers: corsHeaders });
     }
 
-    // 6. Categories Endpoints
+    // 6. Categories Endpoints (with Read-Through KV Edge Cache)
     if (path === "/api/categories" && method === "GET") {
+      if (env.CACHE_KV) {
+        try {
+          const cached = await env.CACHE_KV.get("cache:categories", "text");
+          if (cached) {
+            const hitHeaders = new Headers(corsHeaders);
+            hitHeaders.set("Content-Type", "application/json");
+            hitHeaders.set("CF-Cache-Status", "HIT");
+            hitHeaders.set("X-Cache", "HIT");
+            return new Response(cached, { headers: hitHeaders });
+          }
+        } catch {}
+      }
+
       let categories: any[] = [];
       if (d1Bound) {
         try {
@@ -557,7 +656,17 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           categories = res.results || [];
         } catch (e) {}
       }
-      return new Response(JSON.stringify(categories), { headers: corsHeaders });
+
+      const bodyStr = JSON.stringify(categories);
+      if (env.CACHE_KV) {
+        ctx.waitUntil(env.CACHE_KV.put("cache:categories", bodyStr, { expirationTtl: 86400 }));
+      }
+
+      const missHeaders = new Headers(corsHeaders);
+      missHeaders.set("Content-Type", "application/json");
+      missHeaders.set("CF-Cache-Status", "MISS");
+      missHeaders.set("X-Cache", "MISS");
+      return new Response(bodyStr, { headers: missHeaders });
     }
 
     if (path === "/api/categories" && method === "POST") {
@@ -654,8 +763,27 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
     }
 
-    // 7. Bookmarks Endpoints
+    // 7. Bookmarks Endpoints (with Read-Through KV Edge Cache)
     if (path === "/api/bookmarks" && method === "GET") {
+      const categoryId = url.searchParams.get("categoryId");
+      const search = url.searchParams.get("search");
+      const tag = url.searchParams.get("tag");
+      const isUnfiltered = (!categoryId || categoryId === "all") && !search && !tag;
+
+      // Fast-path Read-Through cache for the primary public navigation view
+      if (isUnfiltered && env.CACHE_KV) {
+        try {
+          const cached = await env.CACHE_KV.get("cache:bookmarks", "text");
+          if (cached) {
+            const hitHeaders = new Headers(corsHeaders);
+            hitHeaders.set("Content-Type", "application/json");
+            hitHeaders.set("CF-Cache-Status", "HIT");
+            hitHeaders.set("X-Cache", "HIT");
+            return new Response(cached, { headers: hitHeaders });
+          }
+        } catch {}
+      }
+
       let bookmarks: any[] = [];
       if (d1Bound) {
         try {
@@ -668,10 +796,26 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         } catch (e) {}
       }
 
-      const categoryId = url.searchParams.get("categoryId");
-      const search = url.searchParams.get("search");
-      const tag = url.searchParams.get("tag");
+      // Sort in canonical order
+      bookmarks.sort((a, b) => {
+        if (Boolean(b.isPinned) !== Boolean(a.isPinned)) {
+          return Boolean(b.isPinned) ? 1 : -1;
+        }
+        return (a.sortOrder || 0) - (b.sortOrder || 0);
+      });
 
+      // Save unfiltered dataset to KV cache
+      if (isUnfiltered && env.CACHE_KV) {
+        const fullJson = JSON.stringify(bookmarks);
+        ctx.waitUntil(env.CACHE_KV.put("cache:bookmarks", fullJson, { expirationTtl: 86400 }));
+        const missHeaders = new Headers(corsHeaders);
+        missHeaders.set("Content-Type", "application/json");
+        missHeaders.set("CF-Cache-Status", "MISS");
+        missHeaders.set("X-Cache", "MISS");
+        return new Response(fullJson, { headers: missHeaders });
+      }
+
+      // Filtered view handling
       if (categoryId && categoryId !== "all") {
         bookmarks = bookmarks.filter((b: any) => b.categoryId === categoryId);
       }
@@ -687,13 +831,6 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       if (tag) {
         bookmarks = bookmarks.filter((b: any) => b.tags && b.tags.includes(tag));
       }
-
-      bookmarks.sort((a, b) => {
-        if (Boolean(b.isPinned) !== Boolean(a.isPinned)) {
-          return Boolean(b.isPinned) ? 1 : -1;
-        }
-        return (a.sortOrder || 0) - (b.sortOrder || 0);
-      });
 
       return new Response(JSON.stringify(bookmarks), { headers: corsHeaders });
     }
@@ -786,8 +923,8 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
     if (clickMatch && method === "POST") {
       const bmId = clickMatch[1];
       if (d1Bound) {
+        // Increment bookmark click directly in D1 without evicting edge read-through cache
         await env.DB!.prepare("UPDATE bookmarks SET clicks = clicks + 1 WHERE id = ?").bind(bmId).run();
-        await invalidateCache(env);
       }
       return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
     }
@@ -1202,7 +1339,7 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
       }
     }
 
-    // 11. URL Metadata Preview (SSRF Protected with Manual Redirect Loop)
+    // 11. URL Metadata Preview (SSRF Protected with Access Control, DoH DNS Rebinding Defense & Manual Redirect Loop)
     if (path === "/api/metadata" && method === "GET") {
       const targetUrl = url.searchParams.get("url");
       if (!targetUrl) return new Response(JSON.stringify({ error: "URL 不能为空" }), { status: 400, headers: corsHeaders });
@@ -1212,8 +1349,35 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
         normalized = "https://" + normalized;
       }
 
+      // Access Control: require authenticated admin OR matching existing bookmark in D1
+      const isAuth = await requireAuth(request, env);
+      let isExistingBookmark = false;
+      if (!isAuth && d1Bound) {
+        try {
+          const match = await env.DB!.prepare("SELECT id FROM bookmarks WHERE url = ? OR url = ?").bind(normalized, targetUrl).first();
+          if (match) isExistingBookmark = true;
+        } catch {}
+      }
+
+      if (!isAuth && !isExistingBookmark) {
+        return new Response(JSON.stringify({
+          error: "未授权：公开访问仅允许查询已收录书签的元数据，未收录网址需要管理员登录以防止 SSRF 代理滥用"
+        }), { status: 403, headers: corsHeaders });
+      }
+
       if (!isSafeUrl(normalized)) {
         return new Response(JSON.stringify({ error: "不安全或受限制的目标网址" }), { status: 400, headers: corsHeaders });
+      }
+
+      // DNS Rebinding Defense via DNS-over-HTTPS
+      try {
+        const parsedHost = new URL(normalized).hostname;
+        const dnsCheck = await validateDnsWithDoH(parsedHost);
+        if (!dnsCheck.safe) {
+          return new Response(JSON.stringify({ error: dnsCheck.error || "DNS 解析到私有/受限地址，已被拦截" }), { status: 400, headers: corsHeaders });
+        }
+      } catch {
+        return new Response(JSON.stringify({ error: "目标域名解析异常" }), { status: 400, headers: corsHeaders });
       }
 
       const controller = new AbortController();
@@ -1239,6 +1403,12 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
             const nextUrl = new URL(location, currentUrl).toString();
             if (!isSafeUrl(nextUrl)) {
               return new Response(JSON.stringify({ error: "重定向到不安全或受限制的目标网址" }), { status: 400, headers: corsHeaders });
+            }
+            // Re-validate redirected hostname with DoH
+            const redirectHost = new URL(nextUrl).hostname;
+            const redDns = await validateDnsWithDoH(redirectHost);
+            if (!redDns.safe) {
+              return new Response(JSON.stringify({ error: "重定向地址未能通过 DNS 安全验证" }), { status: 400, headers: corsHeaders });
             }
             currentUrl = nextUrl;
             continue;

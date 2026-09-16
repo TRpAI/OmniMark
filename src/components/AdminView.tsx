@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Bookmark, Category, SiteSettings, CloudflareSystemStatus } from "../types";
+import { safeFetchJson } from "../utils/security";
 import { 
   FolderPlus, Plus, Edit, Trash2, ArrowUp, ArrowDown, Settings, 
   BookOpen, Download, Shield, Globe, Star, Sparkles, GripVertical,
@@ -45,9 +46,9 @@ export const AdminView: React.FC<AdminViewProps> = ({
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
 
-  // Cloud & AI API Keys
-  const [geminiApiKey, setGeminiApiKey] = useState(settings.geminiApiKey || "");
-  const [cfApiToken, setCfApiToken] = useState(settings.cfApiToken || "");
+  // Cloud & AI API Keys (Write-only buffers for security; secrets never stored in plain state)
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [cfApiToken, setCfApiToken] = useState("");
   const [cfAccountId, setCfAccountId] = useState(settings.cfAccountId || "");
   const [cfD1DatabaseId, setCfD1DatabaseId] = useState(settings.cfD1DatabaseId || "");
   const [cfKvNamespaceId, setCfKvNamespaceId] = useState(settings.cfKvNamespaceId || "");
@@ -65,8 +66,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
     setSiteName(settings.siteName || "");
     setSiteSubtitle(settings.siteSubtitle || "");
     setAnnouncement(settings.announcement || "");
-    setGeminiApiKey(settings.geminiApiKey || "");
-    setCfApiToken(settings.cfApiToken || "");
     setCfAccountId(settings.cfAccountId || "");
     setCfD1DatabaseId(settings.cfD1DatabaseId || "");
     setCfKvNamespaceId(settings.cfKvNamespaceId || "");
@@ -180,7 +179,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
     }
   };
 
-  // Save Settings including Gemini Key & Cloudflare Tokens
+  // Save Settings including Gemini Key & Cloudflare Tokens (write-only)
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSettingsLoading(true);
@@ -190,13 +189,22 @@ export const AdminView: React.FC<AdminViewProps> = ({
         siteName, 
         siteSubtitle, 
         announcement,
-        geminiApiKey,
-        cfApiToken,
         cfAccountId,
         cfD1DatabaseId,
         cfKvNamespaceId
       };
+      // Only transmit new API key/token if explicitly filled by admin
+      if (geminiApiKey.trim()) {
+        body.geminiApiKey = geminiApiKey.trim();
+      }
+      if (cfApiToken.trim()) {
+        body.cfApiToken = cfApiToken.trim();
+      }
       if (newPassword) {
+        if (newPassword.length < 12) {
+          setSettingsMsg({ type: 'error', text: "新密码长度至少需要 12 位（推荐配合密码管理器使用强密码）" });
+          return;
+        }
         body.currentPassword = currentPassword;
         body.newPassword = newPassword;
       }
@@ -205,17 +213,19 @@ export const AdminView: React.FC<AdminViewProps> = ({
         headers: getAuthHeaders(),
         body: JSON.stringify(body)
       });
-      const data = await res.json();
+      const data = await safeFetchJson(res, { error: "解析响应数据失败" });
       if (res.ok) {
-        setSettingsMsg({ type: 'success', text: "系统设置与云端密钥已成功保存！" });
+        setSettingsMsg({ type: 'success', text: "系统设置已成功保存！" });
         setCurrentPassword("");
         setNewPassword("");
+        setGeminiApiKey("");
+        setCfApiToken("");
         onRefreshData();
       } else {
         setSettingsMsg({ type: 'error', text: data.error || "保存设置失败" });
       }
     } catch (err: any) {
-      setSettingsMsg({ type: 'error', text: err.message });
+      setSettingsMsg({ type: 'error', text: err.message || "请求发生异常" });
     } finally {
       setSettingsLoading(false);
     }
@@ -1061,10 +1071,38 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                 </h4>
               </div>
 
+              {/* Zero-Leakage Architecture Guidance */}
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 text-xs leading-relaxed space-y-2">
+                <div className="flex items-center gap-1.5 text-slate-800 dark:text-slate-200 font-semibold">
+                  <Shield className="w-4 h-4 text-emerald-500 shrink-0" />
+                  <span>服务端零泄漏安全架构</span>
+                </div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px] leading-normal">
+                  系统遵循最高安全准则：敏感 API 密钥存储于服务端环境或安全配置中，<strong>绝不会将明文 Secret 反向回传给浏览器</strong>。
+                  在 Cloudflare 生产部署时，推荐直接使用 Worker Secrets 注入，实现密钥完全零落库运行：
+                </p>
+                <div className="p-2.5 rounded-lg bg-slate-950 text-slate-200 font-mono text-[11px] space-y-1 select-all border border-slate-800">
+                  <div className="text-emerald-400"># Cloudflare Worker Secrets 注入命令：</div>
+                  <div>npx wrangler secret put GEMINI_API_KEY</div>
+                  <div>npx wrangler secret put CLOUDFLARE_API_TOKEN</div>
+                </div>
+              </div>
+
               {/* Gemini Key */}
               <div>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-1.5">
-                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Google Gemini API Key</label>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Google Gemini API Key</label>
+                    {settings.hasGeminiApiKey ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                        <CheckCircle2 className="w-3 h-3" /> 已配置就绪 (安全模式)
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                        未配置
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[11px] text-blue-500">Gemini 2.5 Flash 智能推荐引擎</span>
                 </div>
                 <div className="relative">
@@ -1072,7 +1110,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                     type={showGeminiKey ? "text" : "password"}
                     value={geminiApiKey}
                     onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="例如: AIzaSy... (用于智能语义分类推荐与提取网页摘要)"
+                    placeholder={settings.hasGeminiApiKey ? "•••••••••••••••••••• (已就绪，若需更新请输入新密钥)" : "例如: AIzaSy... (输入以设置密钥)"}
                     className={`w-full pl-3.5 pr-10 py-2.5 rounded-xl border text-xs font-mono outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
@@ -1086,14 +1124,25 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1">
-                  填入密钥后，添加书签时即可自动通过 Gemini AI 进行高质量语义分类推荐与智能生成标签。
+                  配置后，添加书签时可自动调用 Gemini 2.5 语义模型进行智能分类推荐与标签生成。
                 </p>
               </div>
 
               {/* Cloudflare API Token */}
               <div>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-1.5">
-                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Cloudflare API Token</label>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Cloudflare API Token</label>
+                    {settings.hasCfApiToken ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                        <CheckCircle2 className="w-3 h-3" /> 已配置就绪 (安全模式)
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                        未配置
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[11px] text-amber-500">Workers / D1 / KV 远程管理</span>
                 </div>
                 <div className="relative">
@@ -1101,7 +1150,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                     type={showCfToken ? "text" : "password"}
                     value={cfApiToken}
                     onChange={(e) => setCfApiToken(e.target.value)}
-                    placeholder="具有 Workers, D1 与 KV 读写权限的 Cloudflare API 令牌"
+                    placeholder={settings.hasCfApiToken ? "•••••••••••••••••••• (已就绪，若需更新请输入新令牌)" : "具有 Workers, D1 与 KV 读写权限的 Cloudflare API 令牌"}
                     className={`w-full pl-3.5 pr-10 py-2.5 rounded-xl border text-xs font-mono outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}
@@ -1196,7 +1245,7 @@ id = "${cfKvNamespaceId || "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"`;
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="输入新密码 (不少于6位)"
+                    placeholder="输入新密码 (建议不少于12位高强度密码)"
                     className={`w-full min-w-0 px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm outline-none transition-all ${
                       darkMode ? "bg-slate-800 border-slate-700 text-white focus:border-blue-500" : "bg-slate-50 border-slate-200 focus:border-blue-500"
                     }`}

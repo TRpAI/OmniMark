@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { safeFetchJson } from "../utils/security";
 import { X, BookOpen, Copy, Check, Terminal } from "lucide-react";
 
 interface ApiDocsModalProps {
@@ -18,8 +19,8 @@ export const ApiDocsModal: React.FC<ApiDocsModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       fetch("/api/docs-spec")
-        .then(res => res.json())
-        .then(data => setSpec(data))
+        .then(res => safeFetchJson(res, null))
+        .then(data => { if (data) setSpec(data); })
         .catch(err => console.error(err));
     }
   }, [isOpen]);

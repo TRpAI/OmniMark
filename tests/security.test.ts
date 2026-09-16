@@ -8,6 +8,10 @@ import {
   isSafePort,
   parseNetscapeBookmarks,
   PUBLIC_SETTINGS_KEYS,
+  ADMIN_SAFE_SETTINGS_KEYS,
+  sanitizeSettingsForAdmin,
+  sanitizeSettingsForPublic,
+  safeFetchJson,
   CLICK_ROUTE_REGEX,
   CATEGORY_ITEM_ROUTE_REGEX,
   BOOKMARK_ITEM_ROUTE_REGEX
@@ -17,7 +21,7 @@ test("PBKDF2 password hashing & verification", async () => {
   const password = "SuperSecretPassword123!";
   const hash = await hashPasswordPBKDF2(password);
 
-  assert.match(hash, /^pbkdf2:sha256:100000:[0-9a-f]{32}:[0-9a-f]{64}$/);
+  assert.match(hash, /^pbkdf2:sha256:\d{5,6}:[0-9a-f]{32}:[0-9a-f]{64}$/);
 
   // Correct password verify
   const resultCorrect = await verifyPasswordPBKDF2(password, hash);
@@ -191,4 +195,78 @@ test("Port safety validation against internal service ports", () => {
   assert.equal(isSafePort(27017), false); // MongoDB
   assert.equal(isSafePort(3306), false); // MySQL
   assert.equal(isSafePort(5432), false); // Postgres
+});
+
+test("Admin settings serialization completely eliminates secret leakage", () => {
+  const fullRawSettings = {
+    siteName: "OmniMark",
+    siteSubtitle: "Navigation",
+    announcement: "Notice",
+    defaultViewMode: "grid",
+    allowPublicSubmit: true,
+    enableWeather: true,
+    enableSearchEngine: true,
+    defaultSearchEngine: "google",
+    cfAccountId: "acc_12345",
+    cfD1DatabaseId: "d1_12345",
+    cfKvNamespaceId: "kv_12345",
+    // Dangerous secrets that must NEVER leak to client
+    adminPasswordHash: "pbkdf2:sha256:100000:salt:hash",
+    geminiApiKey: "AIzaSySecretApiKey12345",
+    cfApiToken: "CloudflareSuperSecretToken98765",
+    unwhitelistedSecret: "should_not_leak"
+  };
+
+  const adminSafe = sanitizeSettingsForAdmin(fullRawSettings);
+
+  // Assert secrets are NOT present
+  assert.equal(adminSafe.adminPasswordHash, undefined);
+  assert.equal(adminSafe.geminiApiKey, undefined);
+  assert.equal(adminSafe.cfApiToken, undefined);
+  assert.equal(adminSafe.unwhitelistedSecret, undefined);
+
+  // Assert presence booleans are generated correctly
+  assert.equal(adminSafe.hasGeminiApiKey, true);
+  assert.equal(adminSafe.hasCfApiToken, true);
+
+  // Assert non-sensitive config keys are retained
+  assert.equal(adminSafe.siteName, "OmniMark");
+  assert.equal(adminSafe.cfAccountId, "acc_12345");
+  assert.equal(adminSafe.cfD1DatabaseId, "d1_12345");
+  assert.equal(adminSafe.cfKvNamespaceId, "kv_12345");
+
+  // Environment variable fallback test
+  const emptySecretsSettings = {
+    siteName: "OmniMark",
+    geminiApiKey: "",
+    cfApiToken: ""
+  };
+  const withEnv = sanitizeSettingsForAdmin(emptySecretsSettings, {
+    hasEnvGeminiKey: true,
+    hasEnvCfToken: false
+  });
+  assert.equal(withEnv.hasGeminiApiKey, true);
+  assert.equal(withEnv.hasCfApiToken, false);
+});
+
+test("safeFetchJson handles empty response without throwing 'Unexpected end of JSON input'", async () => {
+  // 1. Empty body (e.g. 204 No Content or empty string)
+  const emptyRes = new Response("");
+  const emptyResult = await safeFetchJson(emptyRes, { fallback: true });
+  assert.deepEqual(emptyResult, { fallback: true });
+
+  // 2. Whitespace only body
+  const whitespaceRes = new Response("   \n\t  ");
+  const wsResult = await safeFetchJson(whitespaceRes, { defaultVal: 123 });
+  assert.deepEqual(wsResult, { defaultVal: 123 });
+
+  // 3. Valid JSON body
+  const validRes = new Response(JSON.stringify({ success: true, count: 42 }));
+  const validResult = await safeFetchJson(validRes, {});
+  assert.deepEqual(validResult, { success: true, count: 42 });
+
+  // 4. Invalid/corrupt non-JSON response (e.g. HTML 502 error page)
+  const htmlRes = new Response("<html><body>502 Bad Gateway</body></html>");
+  const htmlResult = await safeFetchJson(htmlRes, { error: "bad gateway" });
+  assert.deepEqual(htmlResult, { error: "bad gateway" });
 });

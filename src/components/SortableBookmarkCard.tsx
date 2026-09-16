@@ -5,6 +5,7 @@ import { motion, type Transition } from "motion/react";
 import { Bookmark, ViewMode } from "../types";
 import { Globe, ExternalLink, Copy, Check, GripVertical, MoreVertical, Pin } from "lucide-react";
 import { getCategoryBadgeStyle } from "../utils/categoryBadge";
+import { safeFetchJson } from "../utils/security";
 
 interface SortableBookmarkCardProps {
   bookmark: Bookmark;
@@ -95,8 +96,8 @@ export const SortableBookmarkCard: React.FC<SortableBookmarkCardProps> = ({
         try {
           const res = await fetch(`/api/metadata?url=${encodeURIComponent(bm.url)}`);
           if (res.ok) {
-            const data = await res.json();
-            setMeta(data);
+            const data = await safeFetchJson(res, null);
+            if (data) setMeta(data);
           }
         } catch {
           setMeta({ title: bm.title, description: bm.description || "暂无网页摘要", image: "", hostname: safeGetHostname(bm.url), url: bm.url });

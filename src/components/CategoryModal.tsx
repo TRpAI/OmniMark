@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Category } from "../types";
+import { safeFetchJson } from "../utils/security";
 import { X, FolderPlus } from "lucide-react";
 
 interface CategoryModalProps {
@@ -60,7 +61,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
         onSave();
         onClose();
       } else {
-        const data = await res.json();
+        const data = await safeFetchJson(res, { error: "保存分类失败" });
         setErrorMsg(data.error || "保存分类失败");
       }
     } catch (err: any) {

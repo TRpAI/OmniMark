@@ -7,10 +7,10 @@
  */
 
 // =========================================================================
-// 1. PBKDF2 Cryptographic Password Hashing & Verification
+// 1. PBKDF2 Cryptographic Password Hashing & Verification (OWASP 2023+ Recommended)
 // =========================================================================
 
-const PBKDF2_ITERATIONS = 100000;
+export const PBKDF2_ITERATIONS = 600000;
 const PBKDF2_SALT_BYTES = 16;
 const PBKDF2_KEY_BYTES = 32;
 
@@ -48,7 +48,7 @@ export async function hashPasswordPBKDF2(password: string): Promise<string> {
 
 /**
  * Verifies a password against a stored hash using constant-time comparison.
- * Supports seamless migration from legacy SHA-256 or plaintext hashes.
+ * Supports seamless migration from legacy SHA-256, plaintext hashes, or older iteration counts (<600,000).
  */
 export async function verifyPasswordPBKDF2(
   password: string,
@@ -103,7 +103,11 @@ export async function verifyPasswordPBKDF2(
       diff |= derivedHex.charCodeAt(i) ^ expectedHashHex.charCodeAt(i);
     }
 
-    return { valid: diff === 0, needsUpgrade: false };
+    const isValid = diff === 0;
+    // Automatically trigger hash upgrade if previous iterations were lower than 600,000
+    const needsUpgrade = isValid && iterations < PBKDF2_ITERATIONS;
+
+    return { valid: isValid, needsUpgrade };
   }
 
   // Legacy fallback: plain SHA-256 (64 hex characters) or plaintext migration
@@ -182,9 +186,14 @@ function isPrivateIpv4Num(ipNum: number): boolean {
 function parseIpv4ToNumber(host: string): number | null {
   const trimmed = host.trim().toLowerCase();
 
-  // Case 1: Pure single integer (decimal or hex)
+  // Case 1: Pure single integer (hex, octal, or decimal)
   if (/^0x[0-9a-f]+$/i.test(trimmed)) {
     const val = parseInt(trimmed, 16);
+    if (!isNaN(val) && val >= 0 && val <= 0xffffffff) return val >>> 0;
+  }
+  // Octal single number (e.g. 017700000001)
+  if (/^0[0-7]+$/.test(trimmed)) {
+    const val = parseInt(trimmed, 8);
     if (!isNaN(val) && val >= 0 && val <= 0xffffffff) return val >>> 0;
   }
   if (/^\d+$/.test(trimmed)) {
@@ -249,14 +258,48 @@ function isPrivateIpv6(host: string): boolean {
 }
 
 /**
+ * Evaluates whether an IP address (IPv4 or IPv6, including non-standard notations)
+ * falls into private, loopback, link-local, carrier NAT, multicast, or reserved ranges.
+ */
+export function isPrivateIp(ip: string): boolean {
+  if (!ip || typeof ip !== "string") return true;
+  let clean = ip.trim().toLowerCase();
+  if (clean.startsWith("[") && clean.endsWith("]")) {
+    clean = clean.slice(1, -1);
+  }
+
+  // IPv6 format (contains colons or loopback/unspecified shorthand)
+  if (clean.includes(":") || clean === "::1" || clean === "::") {
+    return isPrivateIpv6(clean);
+  }
+
+  // IPv4 format (dotted, hex, octal, single integer)
+  const ipv4Num = parseIpv4ToNumber(clean);
+  if (ipv4Num !== null) {
+    return isPrivateIpv4Num(ipv4Num);
+  }
+
+  // If not recognized as a valid IP format, return true (defensive default)
+  return true;
+}
+
+/**
+ * Maximum allowed HTML response body size (512 KB) for URL metadata preview scraping
+ * to eliminate memory exhaustion / Slowloris / body bomb DoS risks.
+ */
+export const MAX_METADATA_HTML_BYTES = 512 * 1024; // 524,288 bytes (512 KB)
+
+/**
  * Validates domain and hostname safety against SSRF and internal infrastructure probing.
  */
 export function isSafeDomain(domain: string): boolean {
   if (!domain || typeof domain !== "string" || domain.length > 253) return false;
   let lower = domain.toLowerCase().trim();
 
-  // Strip port if present
-  if (lower.includes(":") && !lower.includes("]")) {
+  // Strip port if present (only when single colon, or bracketed IPv6: [::1]:8080)
+  if (lower.startsWith("[") && lower.includes("]:")) {
+    lower = lower.split("]:")[0] + "]";
+  } else if (!lower.includes("]") && (lower.match(/:/g) || []).length === 1) {
     lower = lower.split(":")[0];
   }
 
@@ -276,12 +319,13 @@ export function isSafeDomain(domain: string): boolean {
     lower.endsWith(".lan") ||
     lower.endsWith(".arpa") ||
     lower.endsWith(".intranet") ||
-    lower.endsWith(".home")
+    lower.endsWith(".home") ||
+    lower.endsWith(".localdomain")
   ) {
     return false;
   }
 
-  // Check IPv6 (bracketed or unbracketed with multiple colons)
+  // Check if domain is an IPv6 representation
   if ((lower.startsWith("[") && lower.endsWith("]")) || (lower.match(/:/g) || []).length >= 2) {
     if (isPrivateIpv6(lower)) return false;
   }
@@ -294,6 +338,75 @@ export function isSafeDomain(domain: string): boolean {
 
   // Validate FQDN format
   return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(lower);
+}
+
+/**
+ * Resolves a hostname via DNS-over-HTTPS (1.1.1.1) and verifies that all resolved IP
+ * addresses are public, non-private, and non-reserved (Universal DNS Rebinding Defense).
+ * Works across both Node.js and Cloudflare Workers environments.
+ */
+export async function validateDnsWithDoH(hostname: string): Promise<{ safe: boolean; addresses: string[]; error?: string }> {
+  try {
+    const cleanHost = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+
+    // If host is already an IP, test directly
+    if (parseIpv4ToNumber(cleanHost) !== null || cleanHost.includes(":")) {
+      if (isPrivateIp(cleanHost)) {
+        return { safe: false, addresses: [cleanHost], error: `目标 IP (${cleanHost}) 属于私有或受限制的内部网络` };
+      }
+      return { safe: true, addresses: [cleanHost] };
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const [aRes, aaaaRes] = await Promise.all([
+      fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(cleanHost)}&type=A`, {
+        headers: { "Accept": "application/dns-json" },
+        signal: controller.signal
+      }).catch(() => null),
+      fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(cleanHost)}&type=AAAA`, {
+        headers: { "Accept": "application/dns-json" },
+        signal: controller.signal
+      }).catch(() => null)
+    ]);
+
+    clearTimeout(timeoutId);
+
+    const addresses: string[] = [];
+
+    if (aRes && aRes.ok) {
+      const aData: any = await aRes.json().catch(() => ({}));
+      if (Array.isArray(aData.Answer)) {
+        for (const ans of aData.Answer) {
+          if (ans.type === 1 && ans.data) addresses.push(ans.data);
+        }
+      }
+    }
+
+    if (aaaaRes && aaaaRes.ok) {
+      const aaaaData: any = await aaaaRes.json().catch(() => ({}));
+      if (Array.isArray(aaaaData.Answer)) {
+        for (const ans of aaaaData.Answer) {
+          if (ans.type === 28 && ans.data) addresses.push(ans.data);
+        }
+      }
+    }
+
+    if (addresses.length === 0) {
+      return { safe: false, addresses: [], error: `DNS 解析未返回有效公网 IP 地址` };
+    }
+
+    for (const addr of addresses) {
+      if (isPrivateIp(addr)) {
+        return { safe: false, addresses, error: `域名解析到私有/受限 IP 地址 (${addr})，存在 DNS 重绑定风险` };
+      }
+    }
+
+    return { safe: true, addresses };
+  } catch (err: any) {
+    return { safe: false, addresses: [], error: `DNS 验证异常: ${err.message}` };
+  }
 }
 
 // Dangerous non-HTTP ports to block against SSRF, port scanning, and internal service probing
@@ -329,6 +442,80 @@ export const PUBLIC_SETTINGS_KEYS = [
   "defaultSearchEngine"
 ] as const;
 
+// Safe settings fields returned to authenticated administrator (strictly excluding sensitive credentials like API keys and password hashes)
+export const ADMIN_SAFE_SETTINGS_KEYS = [
+  ...PUBLIC_SETTINGS_KEYS,
+  "cfAccountId",
+  "cfD1DatabaseId",
+  "cfKvNamespaceId"
+] as const;
+
+/**
+ * Sanitizes settings for authenticated administrator.
+ * In accordance with zero-leakage security principles, sensitive API keys
+ * (Gemini API Key, Cloudflare API Token, password hash) are NEVER returned to the browser.
+ * Instead, boolean indicators (hasGeminiApiKey, hasCfApiToken) are generated.
+ */
+export function sanitizeSettingsForAdmin(
+  rawSettings: Record<string, any> = {},
+  options?: { hasEnvGeminiKey?: boolean; hasEnvCfToken?: boolean }
+): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const key of ADMIN_SAFE_SETTINGS_KEYS) {
+    if (rawSettings[key] !== undefined) {
+      result[key] = rawSettings[key];
+    }
+  }
+
+  // Detect presence of Gemini key from environment variable or database
+  const hasDbGeminiKey = Boolean(
+    rawSettings.geminiApiKey &&
+    rawSettings.geminiApiKey !== '""' &&
+    rawSettings.geminiApiKey !== 'null' &&
+    String(rawSettings.geminiApiKey).trim() !== ""
+  );
+  result.hasGeminiApiKey = Boolean(options?.hasEnvGeminiKey || hasDbGeminiKey);
+
+  // Detect presence of Cloudflare API token from environment variable or database
+  const hasDbCfToken = Boolean(
+    rawSettings.cfApiToken &&
+    rawSettings.cfApiToken !== '""' &&
+    rawSettings.cfApiToken !== 'null' &&
+    String(rawSettings.cfApiToken).trim() !== ""
+  );
+  result.hasCfApiToken = Boolean(options?.hasEnvCfToken || hasDbCfToken);
+
+  return result;
+}
+
+/**
+ * Sanitizes settings for unauthenticated public visitors.
+ * Strictly whitelists UI display fields only.
+ */
+export function sanitizeSettingsForPublic(rawSettings: Record<string, any> = {}): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const key of PUBLIC_SETTINGS_KEYS) {
+    if (rawSettings[key] !== undefined) {
+      result[key] = rawSettings[key];
+    }
+  }
+  return result;
+}
+
+/**
+ * Safely parses JSON from a fetch Response, preventing 'Unexpected end of JSON input' errors
+ * on empty bodies (204 No Content, empty string, or server error pages).
+ */
+export async function safeFetchJson<T = any>(res: Response, fallback: T = {} as T): Promise<T> {
+  try {
+    const text = await res.text();
+    if (!text || !text.trim()) return fallback;
+    return JSON.parse(text);
+  } catch {
+    return fallback;
+  }
+}
+
 export const IMPORT_SETTINGS_WHITELIST = new Set([
   "siteName",
   "siteSubtitle",
@@ -339,6 +526,127 @@ export const IMPORT_SETTINGS_WHITELIST = new Set([
   "enableSearchEngine",
   "defaultSearchEngine"
 ]);
+
+// Minimum password length (OWASP & NIST SP 800-63B recommendation: >= 12 characters for password manager friendly phrases)
+export const MIN_ADMIN_PASSWORD_LENGTH = 12;
+
+/**
+ * Validates admin password length and strength.
+ * Enforces >= 12 characters, friendly for password manager passphrases.
+ */
+export function validatePasswordStrength(password?: string | null): { valid: boolean; error?: string } {
+  if (!password || typeof password !== "string") {
+    return { valid: false, error: "密码不能为空" };
+  }
+  if (password.length < MIN_ADMIN_PASSWORD_LENGTH) {
+    return {
+      valid: false,
+      error: `新密码长度至少需要 ${MIN_ADMIN_PASSWORD_LENGTH} 位（建议使用密码管理器生成长密码或多单词短语）`
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Computes a SHA-256 hash of a session token for secure database storage.
+ * Server stores hashSessionToken(token); client holds raw token.
+ * Even if database/D1 is exposed, attackers cannot use the tokenHash directly.
+ */
+export async function hashSessionToken(token: string): Promise<string> {
+  if (!token || typeof token !== "string") return "";
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(token));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Session Cookie Configuration
+export const SESSION_COOKIE_NAME = "omnimark_session";
+export const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
+
+/**
+ * Parses a standard Cookie header into key-value pairs.
+ */
+export function parseCookies(cookieHeader?: string | null): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader || typeof cookieHeader !== "string") return cookies;
+  const pairs = cookieHeader.split(";");
+  for (const pair of pairs) {
+    const idx = pair.indexOf("=");
+    if (idx > 0) {
+      const k = pair.substring(0, idx).trim();
+      const v = pair.substring(idx + 1).trim();
+      if (k && v) {
+        try {
+          cookies[k] = decodeURIComponent(v);
+        } catch {
+          cookies[k] = v;
+        }
+      }
+    }
+  }
+  return cookies;
+}
+
+/**
+ * Creates a secure HttpOnly Set-Cookie string for admin sessions.
+ */
+export function createSessionCookie(token: string, options?: { secure?: boolean; maxAge?: number }): string {
+  const isSecure = options?.secure ?? false;
+  const maxAge = options?.maxAge ?? SESSION_MAX_AGE_SECONDS;
+  let cookie = `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+  if (isSecure) {
+    cookie += "; Secure";
+  }
+  return cookie;
+}
+
+/**
+ * Creates an expired Set-Cookie string to clear the admin session cookie on logout.
+ */
+export function createClearSessionCookie(options?: { secure?: boolean }): string {
+  const isSecure = options?.secure ?? false;
+  let cookie = `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  if (isSecure) {
+    cookie += "; Secure";
+  }
+  return cookie;
+}
+
+/**
+ * Safely extracts the session token from incoming request credentials:
+ * Priority 1: HttpOnly Cookie ('omnimark_session')
+ * Priority 2: Authorization Header ('Bearer <token>')
+ */
+export function extractSessionToken(headers: { get(name: string): string | null } | Record<string, any>): string | null {
+  const getHeader = (name: string): string | null => {
+    if (!headers) return null;
+    if (typeof (headers as any).get === "function") {
+      return (headers as any).get(name);
+    }
+    const dict = headers as Record<string, any>;
+    const val = dict[name] || dict[name.toLowerCase()] || dict[name.toUpperCase()];
+    if (Array.isArray(val)) return val[0] || null;
+    return typeof val === "string" ? val : null;
+  };
+
+  // 1. Try Cookie
+  const cookieHeader = getHeader("cookie");
+  if (cookieHeader) {
+    const cookies = parseCookies(cookieHeader);
+    if (cookies[SESSION_COOKIE_NAME]) {
+      return cookies[SESSION_COOKIE_NAME];
+    }
+  }
+
+  // 2. Fallback to Authorization: Bearer <token>
+  const authHeader = getHeader("authorization");
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.substring(7).trim();
+    if (token) return token;
+  }
+
+  return null;
+}
 
 /**
  * Parses and normalizes session expiration timestamp.

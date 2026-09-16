@@ -4,6 +4,7 @@ import { X, Globe, Sparkles, Check, ArrowRight } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { recommendCategoryForUrl, CategoryRecommendation } from "../utils/categoryRecommender";
 import { isValidWebUrl, getSafeHref } from "../utils/urlSecurity";
+import { safeFetchJson } from "../utils/security";
 
 interface BookmarkModalProps {
   isOpen: boolean;
@@ -32,6 +33,7 @@ export const BookmarkModal: React.FC<BookmarkModalProps> = ({
   const [tagsInput, setTagsInput] = useState("");
   const [isPinned, setIsPinned] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   // Category recommendation states
@@ -206,7 +208,7 @@ export const BookmarkModal: React.FC<BookmarkModalProps> = ({
         onSave();
         onClose();
       } else {
-        const data = await res.json();
+        const data = await safeFetchJson(res, { error: "保存书签失败" });
         setErrorMsg(data.error || "保存书签失败");
       }
     } catch (err: any) {
@@ -254,13 +256,62 @@ export const BookmarkModal: React.FC<BookmarkModalProps> = ({
     }
   };
 
+  // Safe manual metadata extraction using server-side SSRF/DNS-rebinding protected endpoint
+  const handleFetchMetadata = async () => {
+    let cleanUrl = url.trim();
+    if (!cleanUrl) {
+      setErrorMsg("请先输入有效的网址 URL");
+      return;
+    }
+    if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+      cleanUrl = "https://" + cleanUrl;
+      setUrl(cleanUrl);
+    }
+
+    setFetchingMeta(true);
+    setErrorMsg("");
+    try {
+      const token = localStorage.getItem("omnimark_token");
+      const res = await fetch(`/api/metadata?url=${encodeURIComponent(cleanUrl)}`, {
+        headers: {
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        }
+      });
+      const data = await safeFetchJson<any>(res, { error: "无法解析该网址的元数据" });
+      if (res.ok) {
+        if (data.title) setTitle(data.title);
+        if (data.description) setDescription(data.description);
+        if (data.hostname && !icon) {
+          setIcon(`/api/icon-proxy?domain=${data.hostname}`);
+        }
+        // Refine recommendation
+        const rec = recommendCategoryForUrl({
+          url: cleanUrl,
+          title: data.title || title,
+          categories: safeCategories,
+          bookmarks,
+        });
+        if (rec) {
+          setRecommendation(rec);
+          if (!userManuallySelectedCategory) setCategoryId(rec.category.id);
+        }
+      } else {
+        setErrorMsg(data.error || "元数据提取受限或网址不可访问");
+      }
+    } catch (err: any) {
+      setErrorMsg("提取失败: " + err.message);
+    } finally {
+      setFetchingMeta(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
       {/* 背景遮罩 */}
       <div 
-        onClick={onClose}
+        onClick={onClose} 
         className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm transition-opacity"
       />
 
@@ -293,12 +344,23 @@ export const BookmarkModal: React.FC<BookmarkModalProps> = ({
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="block text-xs font-semibold text-slate-500">网址 URL *</label>
-                {recommendation && (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 font-medium">
-                    <Sparkles className="w-3 h-3 text-blue-500 animate-pulse" />
-                    <span>智能分类识别中</span>
-                  </span>
-                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleFetchMetadata}
+                    disabled={fetchingMeta || !url.trim()}
+                    className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:text-blue-700 font-medium disabled:opacity-50 transition-colors"
+                  >
+                    <Sparkles className={`w-3 h-3 ${fetchingMeta ? "animate-spin" : ""}`} />
+                    <span>{fetchingMeta ? "提取中..." : "自动提取标题与摘要"}</span>
+                  </button>
+                  {recommendation && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 font-medium">
+                      <Sparkles className="w-3 h-3 text-blue-500 animate-pulse" />
+                      <span>智能分类中</span>
+                    </span>
+                  )}
+                </div>
               </div>
               <input
                 type="text"

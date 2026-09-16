@@ -24,18 +24,22 @@ export interface Bookmark {
 export interface SiteSettings {
   siteName: string;
   siteSubtitle: string;
-  adminPasswordHash: string;
   defaultViewMode: 'grid' | 'list' | 'bento' | 'compact';
   allowPublicSubmit: boolean;
   enableWeather: boolean;
   enableSearchEngine: boolean;
   defaultSearchEngine: 'baidu' | 'google' | 'bing' | 'github';
   announcement?: string;
-  geminiApiKey?: string;
-  cfApiToken?: string;
+  // Secure presence indicators (server never returns raw secret keys)
+  hasGeminiApiKey?: boolean;
+  hasCfApiToken?: boolean;
+  // Non-sensitive infrastructure identifiers for wrangler snippet generation
   cfAccountId?: string;
   cfD1DatabaseId?: string;
   cfKvNamespaceId?: string;
+  // Write-only fields when submitting from admin settings panel
+  geminiApiKey?: string;
+  cfApiToken?: string;
 }
 
 export interface CloudflareSystemStatus {

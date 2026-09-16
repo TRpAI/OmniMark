@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { safeFetchJson } from "../utils/security";
 import { X, Download, Upload, FileText, Code } from "lucide-react";
 
 interface ImportExportModalProps {
@@ -44,7 +45,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
           mode: "merge"
         })
       });
-      const data = await res.json();
+      const data = await safeFetchJson<{ success?: boolean; message?: string; error?: string }>(res, { error: "导入响应异常" });
       if (res.ok) {
         setMessage({ type: 'success', text: data.message || "导入成功！" });
         setImportText("");
