@@ -14,6 +14,8 @@ import {
   generateSecureToken,
   isSessionValid,
   extractSessionToken,
+  signJwt,
+  verifyJwt,
   PUBLIC_SETTINGS_KEYS,
   ADMIN_SAFE_SETTINGS_KEYS
 } from "../src/utils/security.ts";
@@ -358,4 +360,38 @@ test("Environment Variable Admin Password Defense: Support ADMIN_PASSWORD and AD
   // 2. Wrong password rejection
   const wrongVerify = await verifyPasswordPBKDF2("WrongPassword123", customHash);
   assert.equal(wrongVerify.valid, false);
+});
+
+/**
+ * Suite 8: Cryptographic JWT (HS256) Sign & Verify Defense
+ */
+test("Cryptographic JWT Defense: Signature integrity, wrong secret rejection, payload tampering, and expiration", async () => {
+  const secretA = "CloudflareSecretKey2026!SecureAndLong";
+  const secretB = "DifferentSecretKey987654321";
+
+  // 1. Valid JWT signing and verification
+  const token = await signJwt({ role: "admin" }, secretA, 3600);
+  assert.equal(typeof token, "string");
+  assert.equal(token.split(".").length, 3);
+
+  const verified = await verifyJwt(token, secretA);
+  assert.equal(verified.valid, true);
+  assert.equal(verified.payload?.role, "admin");
+
+  // 2. Wrong secret verification must fail
+  const wrongSecretVerify = await verifyJwt(token, secretB);
+  assert.equal(wrongSecretVerify.valid, false);
+
+  // 3. Tampered payload must fail
+  const parts = token.split(".");
+  const tamperedPayloadB64 = Buffer.from(JSON.stringify({ role: "superadmin" })).toString("base64url");
+  const tamperedToken = `${parts[0]}.${tamperedPayloadB64}.${parts[2]}`;
+  const tamperedVerify = await verifyJwt(tamperedToken, secretA);
+  assert.equal(tamperedVerify.valid, false);
+
+  // 4. Expired JWT must fail
+  const expiredToken = await signJwt({ role: "admin" }, secretA, -10); // expired 10 seconds ago
+  const expiredVerify = await verifyJwt(expiredToken, secretA);
+  assert.equal(expiredVerify.valid, false);
+  assert.match(expiredVerify.error || "", /expired/i);
 });

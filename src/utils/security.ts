@@ -547,6 +547,137 @@ export function validatePasswordStrength(password?: string | null): { valid: boo
   return { valid: true };
 }
 
+// =========================================================================
+// 1.1 JWT (JSON Web Token - HS256) Cryptographic Signing & Verification
+// =========================================================================
+
+/**
+ * Base64Url encoder compatible across Node.js & Cloudflare Workers.
+ */
+export function base64UrlEncode(data: Uint8Array | string): string {
+  let base64 = "";
+  if (typeof data === "string") {
+    const bytes = new TextEncoder().encode(data);
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    base64 = btoa(binary);
+  } else {
+    let binary = "";
+    for (let i = 0; i < data.byteLength; i++) {
+      binary += String.fromCharCode(data[i]);
+    }
+    base64 = btoa(binary);
+  }
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Base64Url decoder compatible across Node.js & Cloudflare Workers.
+ */
+export function base64UrlDecode(str: string): Uint8Array {
+  let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (base64.length % 4) {
+    base64 += "=";
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Signs a standard JWT with HMAC-SHA256 using Web Crypto API.
+ */
+export async function signJwt(
+  payload: Record<string, any>,
+  secret: string,
+  expiresInSeconds: number = SESSION_MAX_AGE_SECONDS
+): Promise<string> {
+  if (!secret || typeof secret !== "string") {
+    throw new Error("JWT_SECRET is required to sign JWT tokens");
+  }
+  const enc = new TextEncoder();
+  const header = { alg: "HS256", typ: "JWT" };
+  const now = Math.floor(Date.now() / 1000);
+  const fullPayload = {
+    ...payload,
+    iat: now,
+    exp: now + expiresInSeconds,
+    jti: generateSecureToken()
+  };
+
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(fullPayload));
+  const dataToSign = `${headerB64}.${payloadB64}`;
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signatureBuf = await crypto.subtle.sign("HMAC", key, enc.encode(dataToSign));
+  const signatureB64 = base64UrlEncode(new Uint8Array(signatureBuf));
+
+  return `${dataToSign}.${signatureB64}`;
+}
+
+/**
+ * Verifies and decodes a JWT token with constant-time HMAC-SHA256 signature verification.
+ */
+export async function verifyJwt(
+  token: string,
+  secret: string
+): Promise<{ valid: boolean; payload?: any; error?: string }> {
+  if (!token || typeof token !== "string" || !secret) {
+    return { valid: false, error: "Invalid token or secret" };
+  }
+
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return { valid: false, error: "Malformed JWT structure" };
+  }
+
+  const [headerB64, payloadB64, signatureB64] = parts;
+
+  try {
+    const enc = new TextEncoder();
+    const dataToSign = `${headerB64}.${payloadB64}`;
+    const signatureBytes = base64UrlDecode(signatureB64);
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const isValidSig = await crypto.subtle.verify("HMAC", key, signatureBytes, enc.encode(dataToSign));
+    if (!isValidSig) {
+      return { valid: false, error: "Invalid JWT signature" };
+    }
+
+    const payloadJson = new TextDecoder().decode(base64UrlDecode(payloadB64));
+    const payload = JSON.parse(payloadJson);
+
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && typeof payload.exp === "number" && payload.exp < now) {
+      return { valid: false, error: "JWT token has expired", payload };
+    }
+
+    return { valid: true, payload };
+  } catch (e: any) {
+    return { valid: false, error: e?.message || "JWT verification failed" };
+  }
+}
+
 /**
  * Computes a SHA-256 hash of a session token for secure database storage.
  * Server stores hashSessionToken(token); client holds raw token.

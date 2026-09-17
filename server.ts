@@ -12,6 +12,8 @@ import {
   verifyPasswordPBKDF2,
   generateSecureToken,
   hashSessionToken,
+  signJwt,
+  verifyJwt,
   validatePasswordStrength,
   MIN_ADMIN_PASSWORD_LENGTH,
   createSessionCookie,
@@ -249,7 +251,24 @@ async function requireAuth(req: express.Request, res: express.Response, next: ex
     return res.status(401).json({ error: "未授权：请先登录管理员账户以执行该操作" });
   }
 
+  const jwtSecret = process.env.JWT_SECRET;
   const tokenHash = await hashSessionToken(token);
+
+  // 1. Verify cryptographic JWT token if JWT_SECRET is configured
+  if (jwtSecret) {
+    const jwtRes = await verifyJwt(token, jwtSecret);
+    if (jwtRes.valid) {
+      // Check session revocation if session store is active
+      const session = activeAdminSessions.get(tokenHash);
+      if (activeAdminSessions.size > 0 && !session) {
+        return res.status(401).json({ error: "未授权：登录令牌已被注销，请重新登录" });
+      }
+      (req as any).adminTokenHash = tokenHash;
+      return next();
+    }
+  }
+
+  // 2. Fallback to active session store verification
   const session = activeAdminSessions.get(tokenHash);
   if (!session) {
     return res.status(401).json({ error: "未授权：登录令牌无效或已失效，请重新登录" });
@@ -575,7 +594,8 @@ app.post("/api/auth/login", async (req, res) => {
       writeDb(db);
     }
 
-    const token = generateSecureToken();
+    const jwtSecret = process.env.JWT_SECRET;
+    const token = jwtSecret ? await signJwt({ role: "admin" }, jwtSecret, 7 * 24 * 3600) : generateSecureToken();
     const tokenHash = await hashSessionToken(token);
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days expiration
     activeAdminSessions.set(tokenHash, { tokenHash, expiresAt });

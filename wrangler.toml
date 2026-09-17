@@ -4,12 +4,16 @@ pages_build_output_dir = "dist"
 
 [vars]
 ENVIRONMENT = "production"
-# 【管理员密码环境变量配置】
+# 【管理员密码与安全密钥环境变量配置】
 # 您可以在 Cloudflare Pages 控制台【设置 (Settings) -> 环境变量 (Variables and Secrets)】中添加：
-# 变量名: ADMIN_PASSWORD  (或 OMNIMARK_INITIAL_ADMIN_PASSWORD)
-# 值: 您的自定义管理员密码 (建议在控制台勾选 Encrypt 加密保存)
+# 1. 变量名: ADMIN_PASSWORD
+#    值: 您的自定义管理员密码 (建议在控制台勾选 Encrypt 加密保存)
 # 
-# 如果设置了 ADMIN_PASSWORD，系统首次启动或登录时会直接使用该密码并安全加密入库。
+# 2. 变量名: JWT_SECRET
+#    值: 用于对管理员 Session 令牌进行 HMAC-SHA256 签名加密的密钥字符串 (建议勾选 Encrypt)
+# 
+# 如果设置了 ADMIN_PASSWORD，系统首次启动或登录时会直接使用该密码并安全加密入库；
+# 如果设置了 JWT_SECRET，系统将基于该密钥签发标准 JWT 管理员凭证。
 
 # =========================================================================
 # 【Cloudflare 控制台图形化部署与 wrangler.toml 绑定配置】

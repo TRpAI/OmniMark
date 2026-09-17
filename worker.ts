@@ -11,6 +11,8 @@ import {
   verifyPasswordPBKDF2,
   generateSecureToken,
   hashSessionToken,
+  signJwt,
+  verifyJwt,
   validatePasswordStrength,
   MIN_ADMIN_PASSWORD_LENGTH,
   createSessionCookie,
@@ -69,6 +71,7 @@ export interface Env {
   ADMIN_PASSWORD_HASH?: string;
   OMNIMARK_ADMIN_PASSWORD?: string;
   OMNIMARK_INITIAL_ADMIN_PASSWORD?: string;
+  JWT_SECRET?: string;
   GEMINI_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
   [key: string]: any;
@@ -246,6 +249,26 @@ async function requireAuth(request: Request, env: Env): Promise<Response | null>
 
   try {
     const tokenHash = await hashSessionToken(token);
+
+    // 1. Verify cryptographic JWT token if JWT_SECRET is configured
+    if (env.JWT_SECRET) {
+      const jwtRes = await verifyJwt(token, env.JWT_SECRET);
+      if (jwtRes.valid) {
+        // If D1 is bound, verify that the session has not been revoked on logout
+        const session = await env.DB.prepare(
+          "SELECT tokenHash, expiresAt FROM admin_sessions WHERE tokenHash = ? OR token = ?"
+        ).bind(tokenHash, token).first<any>();
+        if (!session) {
+          return new Response(JSON.stringify({ error: "未授权：登录令牌已被注销，请重新登录" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return null;
+      }
+    }
+
+    // 2. Fallback to D1 admin_sessions table verification
     // Support matching by SHA-256 tokenHash (preferred) or legacy raw token
     const session = await env.DB.prepare(
       "SELECT tokenHash, expiresAt FROM admin_sessions WHERE tokenHash = ? OR token = ?"
@@ -499,7 +522,9 @@ async function handleApiRequest(request: Request, env: Env, ctx: ExecutionContex
           await env.DB!.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)").bind(JSON.stringify(upgradedHash)).run();
         }
 
-        const token = generateSecureToken();
+        const token = env?.JWT_SECRET
+          ? await signJwt({ role: "admin" }, env.JWT_SECRET, 7 * 24 * 3600)
+          : generateSecureToken();
         const tokenHash = await hashSessionToken(token);
         const expiresAt = Date.now() + 86400000 * 7; // 7 days expiration in ms
         if (d1Bound) {
